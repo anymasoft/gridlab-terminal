@@ -132,6 +132,7 @@ class LiveSession:
             e = PaperEngine(sym, 0.0, self.params, self.cost, self.fmap.get(sym),
                             spec=self.specs.get(sym))
             e.warm(cmap[sym])
+            e.tf = self.interval
             e.last_funding_ts = cmap[sym][-1].ts
             self.engines[sym] = e
             self.hist[sym] = list(cmap[sym][-150:])
@@ -152,6 +153,7 @@ class LiveSession:
                 continue
             e.ind = Indicators(atr_window=e.p.atr_window, ema_window=e.p.ema)
             e.warm(cs)
+            e.tf = interval
             e.last_funding_ts = cs[-1].ts
             self.hist[sym] = list(cs[-150:])
 
@@ -722,6 +724,9 @@ class LiveSession:
             "started": se.active,
             "any_started": self.state["started"],
             "free_cash": round(self.free_cash, 2),
+            # Таймфрейм СЕССИИ: по нему считается ATR, и он может не совпадать
+            # с масштабом графика — из-за чего шаг «от ATR» выглядит взявшимся ниоткуда.
+            "interval": self.interval,
             # Параметры ВЫБРАННОЙ сетки: панель «Параметры» правит её, а не сессию.
             # Плечо отдаём ДЕЙСТВУЮЩЕЕ: в самом параметре 0 означает «как в конфиге»,
             # и показывать человеку ноль вместо реальной тройки нельзя.

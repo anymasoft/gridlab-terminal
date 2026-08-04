@@ -535,3 +535,47 @@ if __name__ == "__main__":
             fn()
             print(f"  OK {name}")
     print("\nALL OK (classic grid + risk)")
+
+
+# ─────────────── откуда взялся шаг ───────────────
+def test_step_origin_names_the_source_in_pct_mode():
+    """Вопрос «почему такой шаг» обязан иметь ответ прямо в интерфейсе."""
+    e = _spec_engine(grid_step_mode="pct", grid_step_pct=0.75)
+    assert e._step_origin() == "0.75% от цены"
+
+
+def test_step_origin_names_the_timeframe_atr_was_taken_from():
+    """Шаг «от ATR» считается ОДИН РАЗ при установке, по таймфрейму сессии,
+    и дальше не меняется — лестница неподвижна. Поэтому в подписи обязан
+    стоять тот таймфрейм, что был в момент установки: ATR минуток и ATR
+    пятнадцатиминуток отличаются на порядок, и без отметки число
+    «1.5×ATR» выглядит взявшимся ниоткуда."""
+    e = _spec_engine(grid_step_mode="atr", grid_spacing=1.5)
+    e.tf = "15"
+    e.start_strategy(100.0)
+    assert e.step_tf == "15", "таймфрейм установки не записан"
+    assert e._step_origin() == "1.5×ATR(14) на 15m"
+
+    # график переключили на минутки — шаг и подпись остались прежними,
+    # потому что лестница не переставлялась
+    e.tf = "1"
+    assert e._step_origin() == "1.5×ATR(14) на 15m"
+
+
+def test_step_origin_survives_restart():
+    e = _spec_engine(grid_step_mode="atr", grid_spacing=1.5)
+    e.tf = "60"
+    e.start_strategy(100.0)
+    fresh = _spec_engine(grid_step_mode="atr", grid_spacing=1.5)
+    fresh.load_state(e.to_state())
+    assert fresh._step_origin() == "1.5×ATR(14) на 1h"
+
+
+def test_grid_info_reports_step_in_percent():
+    """В деньгах шаг ни о чём не говорит: 263 на BTC — это 0.4%, а на DOGE
+    такого шага не бывает вовсе. Процент сопоставим с ходом цены."""
+    e = _spec_engine(grid_step_mode="pct", grid_step_pct=1.0)
+    e.start_strategy(100.0)
+    gi = e.grid_info()
+    assert abs(gi["step_pct"] - 1.0) < 0.05, f"ожидался ~1%, получено {gi['step_pct']}"
+    assert gi["origin"] == "1% от цены"

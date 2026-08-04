@@ -51,6 +51,10 @@ class StepEvent:
 _ROUNDTRIP_CAP = 500
 
 
+def _tf_label(tf: str) -> str:
+    return {"60": "1h", "240": "4h"}.get(str(tf), f"{tf}m")
+
+
 class PaperEngine:
     def __init__(self, sym: str, alloc: float, params: GridParams, cost: CostModel,
                  funding: dict[int, float] | None = None, mult: float = 1.0,
@@ -73,6 +77,13 @@ class PaperEngine:
         # Mark price биржи. Ликвидация у Bybit считается ОТ НЕЁ, а не от последней сделки:
         # last может дёрнуться на тонком стакане, mark сглажен по индексу.
         self.mark_price = 0.0
+        # Таймфрейм, на котором СЧИТАЛСЯ ATR в момент установки лестницы. Классический
+        # грид ставит уровни один раз и больше их не двигает, поэтому шаг остаётся от
+        # того масштаба, что был тогда, — даже если график потом переключили. Без этой
+        # отметки подпись «1.5×ATR» вводит в заблуждение: ATR минуток и ATR
+        # пятнадцатиминуток отличаются на порядок.
+        self.tf = ""
+        self.step_tf = ""
         self.rejected_min_qty = 0    # сколько заявок не выставлено: объём ниже минимума
         self.rejected_margin = 0     # сколько заявок не выставлено: не хватило маржи
         self.blocked_reason = ""     # почему инструмент не торгуется (пусто = торгуется)
@@ -425,6 +436,7 @@ class PaperEngine:
         quotes = self.ladder.install(center, step, self._grid_size_of)
         if not quotes:
             return
+        self.step_tf = self.tf
         self.orders = manual
         placed = 0
         for q in quotes:
@@ -547,15 +559,42 @@ class PaperEngine:
             return True
         return False
 
+    def _step_origin(self) -> str:
+        """Откуда взялся шаг — человекочитаемо.
+
+        Вопрос «почему такой шаг» иначе не имеет ответа в интерфейсе: одно и то же
+        число получается и из процента, и из ATR, и введено вручную, а разница
+        принципиальна. ATR ещё и считается по таймфрейму СЕССИИ, который может
+        не совпадать с масштабом графика."""
+        if self.p.mode != "grid":
+            return f"{self.p.grid_spacing:g}×ATR"
+        if self.p.grid_step_mode == "abs" and self.p.grid_step_abs > 0:
+            return "задан в деньгах"
+        if self.p.grid_step_mode == "pct" and self.p.grid_step_pct > 0:
+            return f"{self.p.grid_step_pct:g}% от цены"
+        origin = f"{max(self.p.grid_spacing, 0.1):g}×ATR({self.p.atr_window})"
+        if self.step_tf:
+            origin += f" на {_tf_label(self.step_tf)}"
+        return origin
+
     def grid_info(self) -> dict:
         """Реальные шаг/диапазон сетки движка — для панели «ТЕКУЩАЯ СЕТКА»."""
         prices = [o.price for o in self.orders if not o.manual]
+        px = self._last_price
         if self.p.mode == "grid" and self.ladder.installed:
-            return {"step": round(self.ladder.step, 4), "center": round(self.ladder.center, 4),
+            step = self.ladder.step
+            return {"step": round(step, 4), "center": round(self.ladder.center, 4),
+                    # Шаг в процентах и его происхождение: в деньгах 263 ни о чём
+                    # не говорит, а 0.41% сразу сопоставимо с ходом цены.
+                    "step_pct": round(step / px * 100.0, 3) if px > 0 else None,
+                    "origin": self._step_origin(),
                     "low": round(min(prices), 4) if prices else None,
                     "high": round(max(prices), 4) if prices else None,
                     "count": len(prices)}
         return {"step": round(self.quoter.last_step, 4) if self.quoter.last_step else None,
+                "step_pct": (round(self.quoter.last_step / px * 100.0, 3)
+                             if self.quoter.last_step and px > 0 else None),
+                "origin": self._step_origin(),
                 "low": round(min(prices), 4) if prices else None,
                 "high": round(max(prices), 4) if prices else None,
                 "count": len(prices)}
@@ -1007,6 +1046,7 @@ class PaperEngine:
             # и в интерфейсе он выглядит «активен · 0 орд» без единого объяснения,
             # почему сетки нет.
             "roundtrips": self.roundtrips[-200:],
+            "step_tf": self.step_tf,
             "blocked_reason": self.blocked_reason,
             "rejected_min_qty": self.rejected_min_qty,
             "rejected_margin": self.rejected_margin,
@@ -1045,6 +1085,7 @@ class PaperEngine:
             if not self.orders:
                 self.ladder.installed = False
         self.roundtrips = list(st.get("roundtrips") or [])
+        self.step_tf = st.get("step_tf", "")
         self.blocked_reason = st.get("blocked_reason", "")
         self.rejected_min_qty = st.get("rejected_min_qty", 0)
         self.rejected_margin = st.get("rejected_margin", 0)

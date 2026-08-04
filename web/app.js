@@ -391,10 +391,18 @@ function chartHintHTML(){
   // панели и потом врала — сетка работала, а под графиком висело «не запущена».
   const mode = S.params.mode==='grid'?'классический грид'
              : S.params.mode==='avellaneda'?'Avellaneda-Stoikov':'эвристика';
-  const hint = stratOn()
-    ? ' · сетка работает: сплошные — стоящие лимитки, пунктир — следующие уровни'
-    : ' · сетка не запущена — нажми «Старт · '+S.selInst+'»';
-  return 'Grid · '+mode+hint;
+  if(!stratOn()) return 'Grid · '+mode+' · сетка не запущена — нажми «Старт · '+S.selInst+'»';
+  // Шаг обязан быть виден НА ГРАФИКЕ вместе с тем, откуда он взялся. Вопрос
+  // «почему такой огромный шаг» иначе требует открыть панель и знать, что
+  // «от ATR» считается по таймфрейму СЕССИИ, а не по масштабу графика.
+  const gi=(S.live&&S.live.grid_info)||{};
+  let s='';
+  if(gi.step){
+    const st = gi.step>=100 ? gi.step.toFixed(0) : gi.step>=1 ? gi.step.toFixed(2) : String(gi.step);
+    s=' · шаг '+st+(gi.step_pct!=null?' ('+gi.step_pct+'%)':'');
+    if(gi.origin) s+=' = '+gi.origin;
+  }
+  return 'Grid · '+mode+s+' · сплошные — стоящие лимитки, пунктир — следующие уровни';
 }
 
 function centerPanel(){
