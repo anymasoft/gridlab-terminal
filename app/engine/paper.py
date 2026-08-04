@@ -47,6 +47,10 @@ class StepEvent:
     comment: str
 
 
+# сколько последних закрытых пар держать в памяти и в состоянии сессии
+_ROUNDTRIP_CAP = 500
+
+
 class PaperEngine:
     def __init__(self, sym: str, alloc: float, params: GridParams, cost: CostModel,
                  funding: dict[int, float] | None = None, mult: float = 1.0,
@@ -88,6 +92,9 @@ class PaperEngine:
         self.buy_filled = 0.0     # суммарно исполнено контрактов в ЛОНГ (покупки)
         self.sell_filled = 0.0    # суммарно исполнено контрактов в ШОРТ (продажи)
         self.realized_pnls: list[float] = []
+        # Закрытые пары «вход → выход» с деньгами. Хранится ограниченный хвост:
+        # это журнал для чтения человеком, а не источник метрик.
+        self.roundtrips: list[dict] = []
         self.last_funding_ts = 0
         self.liquidated = False
         self.active = False       # стратегия запущена явно? до этого — только ручные ордера
@@ -155,7 +162,23 @@ class PaperEngine:
             entry_fee_share = pos.fees_open * (closing / abs(pos.qty)) if pos.qty else 0.0
             exit_fee_share = fee * (closing / abs(qty)) if qty else 0.0
             pos.fees_open -= entry_fee_share
-            self.realized_pnls.append(realized - entry_fee_share - exit_fee_share)
+            net = realized - entry_fee_share - exit_fee_share
+            self.realized_pnls.append(net)
+            # Журнал ЗАКРЫТЫХ ПАР. Список филлов на этот вопрос не отвечает:
+            # в нём видно «купил» и «продал» по отдельности, а человеку нужно
+            # «взял по 1000, отдал по 1200, заработал 200». Пишем сразу обе ноги.
+            self.roundtrips.append({
+                "ts": ts,
+                "dir": "long" if pos.qty > 0 else "short",
+                "entry": pos.avg_entry,
+                "exit": price,
+                "qty": closing,
+                "gross": realized,
+                "fee": entry_fee_share + exit_fee_share,
+                "net": net,
+            })
+            if len(self.roundtrips) > _ROUNDTRIP_CAP:
+                del self.roundtrips[:len(self.roundtrips) - _ROUNDTRIP_CAP]
             remaining = abs(signed) - closing
             pos.qty += signed
             if abs(pos.qty) < 1e-12:
@@ -949,6 +972,7 @@ class PaperEngine:
             # _install_ladder больше не вызывается, причина не восстанавливается,
             # и в интерфейсе он выглядит «активен · 0 орд» без единого объяснения,
             # почему сетки нет.
+            "roundtrips": self.roundtrips[-200:],
             "blocked_reason": self.blocked_reason,
             "rejected_min_qty": self.rejected_min_qty,
             "rejected_margin": self.rejected_margin,
@@ -986,6 +1010,7 @@ class PaperEngine:
             # «установлено, ордеров ноль, объяснений нет».
             if not self.orders:
                 self.ladder.installed = False
+        self.roundtrips = list(st.get("roundtrips") or [])
         self.blocked_reason = st.get("blocked_reason", "")
         self.rejected_min_qty = st.get("rejected_min_qty", 0)
         self.rejected_margin = st.get("rejected_margin", 0)

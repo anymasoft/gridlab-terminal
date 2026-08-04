@@ -174,6 +174,39 @@ def test_new_account_clears_previous_exchange_rejections():
     assert abs(_account_total(sess) - 1000.0) < 1e-6
 
 
+def test_session_persists_trades_and_journal_across_restart(tmp_path):
+    """Сделки и журнал закрытых пар обязаны пережить перезапуск сервера.
+
+    Это ровно то, ради чего сессия пишется на диск: после рестарта счёт должен
+    выглядеть так же, как биржевой аккаунт, — с той же кассой, тем же числом
+    сделок и той же историей закрытых пар."""
+    sess = _session()
+    sess.session_path = tmp_path / "s.json"
+    sess.start_strategy("SOLUSDT")
+    e = sess.engines["SOLUSDT"]
+    e._apply_fill("buy", 0.5, 150.0, True, 1, "")
+    e._apply_fill("sell", 0.5, 153.0, True, 2, "")
+    sess._persist()
+
+    before = (e.cash, e.alloc, e.trades, len(e.roundtrips),
+              e.roundtrips[-1]["net"], sess.free_cash)
+
+    fresh = _session()
+    fresh.session_path = sess.session_path
+    fresh._restore()
+    f = fresh.engines["SOLUSDT"]
+    after = (f.cash, f.alloc, f.trades, len(f.roundtrips),
+             f.roundtrips[-1]["net"], fresh.free_cash)
+    assert before == after, f"состояние разъехалось: {before} -> {after}"
+    assert f.active, "работавшая сетка обязана остаться работающей"
+    # Счёт после сделок равен депозиту плюс заработанное минус издержки —
+    # не «ровно $1000»: прибыль закрытых пар уже лежит в кассе.
+    assert abs(_account_total(fresh) - _account_total(sess)) < 1e-9
+    expected = (1000.0 + f.pos.realized - f.pos.fees_paid - f.pos.funding_paid)
+    assert abs(_account_total(fresh) - expected) < 1e-6, \
+        f"на счёте {_account_total(fresh)}, а по потокам должно быть {expected}"
+
+
 def test_starting_without_free_money_does_not_invent_it():
     """Если весь счёт держат открытые позиции, новая сетка денег не получает —
     и не выставляется. Молча занять несуществующие деньги нельзя."""

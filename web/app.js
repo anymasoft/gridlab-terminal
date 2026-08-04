@@ -161,7 +161,7 @@ function dash(){
   if(S.streamMode==='live' && S.live) return S.live.dash;
   if(S.tradingStarted && S.result){
     const r=S.result;
-    return {balance:r.balance,equity:r.equity,roi:r.roi,drawdown:r.drawdown,realized:r.realized,unrealized:r.unrealized,open_orders:r.open_orders,trades:r.trades,fees:r.fees,funding:r.funding};
+    return {balance:r.balance,equity:r.equity,roi:r.roi,drawdown:r.drawdown,realized:r.realized,unrealized:r.unrealized,open_orders:r.open_orders,trades:r.trades,pos_qty:r.pos_qty,pos_avg:r.pos_avg,last_net:r.last_net,fees:r.fees,funding:r.funding};
   }
   const cap=S.cfg?S.cfg.start_capital:1000;
   return {balance:cap,equity:cap,roi:0,drawdown:0,realized:0,unrealized:0,open_orders:0,trades:0,fees:0,funding:0};
@@ -346,6 +346,19 @@ function card(label,val,color,tip){
     <span class="mono" style="font-size:13.5px;font-weight:600;margin-top:2px;${color?'color:'+color+';':''}">${val}</span></div>`;
 }
 
+function posCard(d){
+  // «Что у меня сейчас куплено и почём» — прямой аналог открытой позиции на ФОРТС.
+  // Пока пара не закрыта, деньги по ней сидят в UNREAL.
+  if(d.pos_qty==null || Math.abs(d.pos_qty)<1e-12)
+    return card('ПОЗИЦИЯ','нет',null,
+      'Открытой позиции нет: всё, что покупалось, уже продано обратно. Деньги закрытых пар лежат в REALIZED.');
+  const long=d.pos_qty>0;
+  const val=(long?'+':'')+(+d.pos_qty).toFixed(6).replace(/0+$/,'').replace(/\.$/,'');
+  return card('ПОЗИЦИЯ', val, long?C.green:C.red,
+    `Сейчас ${long?'куплено':'продано'} ${Math.abs(d.pos_qty)} по средней цене ${d.pos_avg}. `+
+    `Пока позиция не закрыта, её переоценка сидит в UNREAL., а не в REALIZED.`);
+}
+
 function cardsHTML(){
   const d=dash();
   const roiColor = d.roi>=0?C.green:C.red;
@@ -356,10 +369,10 @@ function cardsHTML(){
     card('DRAWDOWN','-'+d.drawdown+'%',C.red),
     card('REALIZED',fmt(d.realized),d.realized>=0?C.green:C.red),
     card('UNREAL.',fmt(d.unrealized),d.unrealized>=0?C.green:C.red),
-    card('ЛИМИТОК',String(d.open_orders),null,
-      'Сколько заявок СТОИТ в стакане и ждёт цену — как «Активные ордера» на бирже. Это не исполненные сделки. У сетки из 10 уровней их всегда около 20 (10 покупок + 10 продаж): как только заявка исполняется, сетка тут же ставит парную на уровень выше или ниже, и счётчик возвращается к прежнему. Исполнения смотрите в «СДЕЛОК» и во вкладке «Сделки».'),
-    card('СДЕЛОК',String(d.trades!=null?d.trades:0),null,
-      'Сколько заявок РЕАЛЬНО исполнилось с начала счёта. Именно этот счётчик растёт при каждом касании ценой уровня сетки.'),
+    posCard(d),
+    card('ПОСЛ. СДЕЛКА', d.last_net!=null?fmt(d.last_net):'—',
+      d.last_net==null?null:(d.last_net>=0?C.green:C.red),
+      'Результат последней ЗАКРЫТОЙ пары: взяли по одной цене, отдали по другой, разница за вычетом комиссий обеих ног. Все закрытые пары — во вкладке «Сделки».'),
     card('FEES',fmt(-d.fees),C.red),
     card('FUNDING',fmt(-d.funding),d.funding>=0?C.red:C.green),
   ].join('');
@@ -446,6 +459,10 @@ function bottomTab(){
       ${cell('ИТОГ $1000→','$'+r.equity.toFixed(2),r.roi>=0?C.green:C.red)}
     </div>`;
   }
+  // Вкладка «Сделки» — журнал ЗАКРЫТЫХ ПАР, а не отдельных исполнений.
+  // Список филлов на главный вопрос не отвечает: в нём видно «купил» и «продал»
+  // порознь, а нужно «взял по 1000, отдал по 1200, заработал 200».
+  if(S.tab==='trades' && S.streamMode==='live') return roundtripsHTML();
   const isTrades = S.tab==='trades';
   const allRows = logRows();
   const rows = isTrades ? allRows.filter(e=>e.action.includes('Grid')||e.action.includes('Ликвид')||e.action.includes('Stop')) : allRows;
@@ -460,6 +477,36 @@ function bottomTab(){
     return `<div class="mono" style="display:grid;grid-template-columns:${cols};padding:5px 10px;border-bottom:1px solid #f4f5f2;font-size:11px;align-items:center;">${cells.join('')}</div>`;
   }).join('');
   return `<div style="min-width:760px;">${hrow}${body||'<div style="padding:14px;color:#939a93;font-size:12px;">Нет записей.</div>'}</div>`;
+}
+
+function roundtripsHTML(){
+  const rt = (S.live && S.live.roundtrips) || [];
+  const cols = '58px 74px 104px 104px 92px 78px 74px 1fr';
+  const head = [['ВРЕМЯ',''],['НАПРАВЛ.',''],['ВЗЯЛИ ПО',''],['ОТДАЛИ ПО',''],
+                ['ОБЪЁМ',''],['РАЗНИЦА',''],['КОМИССИЯ',''],['ИТОГ',''] ];
+  const hrow = `<div style="display:grid;grid-template-columns:${cols};padding:6px 10px;border-bottom:1px solid #eef0ec;background:#fafbf9;position:sticky;top:0;z-index:1;">`
+    + head.map(h=>`<span style="font-size:9px;letter-spacing:.08em;color:#939a93;font-weight:600;">${h[0]}</span>`).join('') + '</div>';
+  if(!rt.length) return `<div style="min-width:700px;">${hrow}<div style="padding:14px;color:#939a93;font-size:12px;">Закрытых сделок пока нет. Строка появится, когда сетка купит на одном уровне и продаст на другом.</div></div>`;
+  const body = rt.map(r=>{
+    const t2=new Date(r.ts).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    const long=r.dir==='long';
+    const cells=[
+      `<span style="color:#939a93;">${t2}</span>`,
+      `<span style="font-weight:500;color:${long?C.green:C.red};">${long?'лонг':'шорт'}</span>`,
+      `<span>${r.entry}</span>`,
+      `<span>${r.exit}</span>`,
+      `<span style="color:#5b635e;">${r.qty}</span>`,
+      `<span style="color:${r.gross>=0?C.green:C.red};">${fmt(r.gross)}</span>`,
+      `<span style="color:#a93529;">${fmt(-r.fee)}</span>`,
+      `<span style="font-weight:700;color:${r.net>=0?C.green:C.red};">${fmt(r.net)}</span>`];
+    return `<div class="mono" style="display:grid;grid-template-columns:${cols};padding:5px 10px;border-bottom:1px solid #f4f5f2;font-size:11px;align-items:center;">${cells.join('')}</div>`;
+  }).join('');
+  const sum = rt.reduce((a,r)=>a+r.net,0);
+  const foot = `<div class="mono" style="display:grid;grid-template-columns:${cols};padding:7px 10px;border-top:1px solid #e3e6e0;background:#fafbf9;font-size:11px;position:sticky;bottom:0;">`
+    + `<span style="color:#939a93;">ИТОГО</span><span style="color:#939a93;">${rt.length} шт</span>`
+    + `<span></span><span></span><span></span><span></span><span></span>`
+    + `<span style="font-weight:700;color:${sum>=0?C.green:C.red};">${fmt(sum)}</span></div>`;
+  return `<div style="min-width:700px;">${hrow}${body}${foot}</div>`;
 }
 
 function paramRow(label,key,step,min,max){

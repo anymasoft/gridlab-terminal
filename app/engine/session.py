@@ -727,8 +727,21 @@ class LiveSession:
                      # он почти всегда стоит на месте (исполнилась заявка — сразу
                      # выставилась парная), и по нему не видно, торгует ли сетка.
                      "trades": sum(e.trades for e in engines.values()),
+                     # Позиция и последняя закрытая пара по ВЫБРАННОМУ инструменту:
+                     # «что у меня сейчас куплено и почём» и «сколько принесла
+                     # последняя закрытая сделка» — то, что человек и хочет видеть.
+                     "pos_qty": round(se.pos.qty, 8),
+                     "pos_avg": round(se.pos.avg_entry, 6),
+                     "last_net": (round(se.roundtrips[-1]["net"], 4)
+                                  if se.roundtrips else None),
                      "funding": round(total_fund, 2)},
             "instruments": instruments,
+            "roundtrips": [
+                {"ts": r["ts"], "dir": r["dir"], "entry": round(r["entry"], 6),
+                 "exit": round(r["exit"], 6), "qty": round(r["qty"], 8),
+                 "gross": round(r["gross"], 4), "fee": round(r["fee"], 4),
+                 "net": round(r["net"], 4)}
+                for r in se.roundtrips[-120:]][::-1],
             "candles": [[c.o, c.h, c.l, c.c, c.v] for c in tail],
             "times": [int(c.ts // 1000) for c in tail],
             "markers": markers[-_LIVE_LOG_CAP:],
