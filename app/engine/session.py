@@ -85,6 +85,12 @@ class LiveSession:
         # в free_cash и достаются той, которую запустят следующей.
         self.sym_params: dict[str, GridParams] = {}
         self.free_cash = float(settings.start_capital)
+        # Что человек велел торговать. Сетка выключается сама по трём причинам —
+        # ликвидация, отказ биржи, kill-switch, — и на бумажном счёте ни одна
+        # из них не повод показать утром пустой экран. Пока символ здесь,
+        # сессия поднимает его обратно; убирает его только кнопка «Стоп».
+        self.wanted: set[str] = set()
+        self.never_stop = True
         self.ob_state = {"sym": None, "data": None}
         self.ob_feed: OrderBookFeed | None = None   # живой L2-стакан по WS (блок B)
         self.archiver: ArchiveWriter | None = None  # фоновый архив L2+сделок (блок E)
@@ -105,7 +111,8 @@ class LiveSession:
         self._tasks = [asyncio.create_task(self._tick_loop()),
                        asyncio.create_task(self._trades_loop()),
                        asyncio.create_task(self._ob_loop()),
-                       asyncio.create_task(self._persist_loop())]
+                       asyncio.create_task(self._persist_loop()),
+                       asyncio.create_task(self._revive_loop())]
 
     async def _build(self):
         # восстановить сохранённый ТФ ДО загрузки свечей (чтобы прогрев/ATR были на нужном ТФ)
@@ -171,6 +178,9 @@ class LiveSession:
             return
         self.capital = cap
         self.free_cash = cap        # весь счёт свободен: сетки берут долю при запуске
+        # Новый счёт снимает торговлю со ВСЕХ пар. Без этой строки автоподъём
+        # через полминуты запустил бы обратно всё, что работало до сброса.
+        self.wanted.clear()
         for sym, e in self.engines.items():
             e.alloc = 0.0
             e.cash = 0.0
@@ -234,6 +244,11 @@ class LiveSession:
                                    + e.pos.fees_paid + e.pos.funding_paid)
                 e.p = self.params_for(sym)
 
+        self.wanted = {s for s in (data.get("wanted") or []) if s in self.engines}
+        if not self.wanted:
+            # состояние старого формата: считаем желанными все, кто был активен
+            self.wanted = {s for s, e in self.engines.items() if e.active}
+        self.never_stop = bool(data.get("never_stop", True))
         if "free_cash" in data:
             self.free_cash = float(data["free_cash"])
         else:
@@ -256,6 +271,7 @@ class LiveSession:
                 "params": self.params.model_dump(),
                 "free_cash": self.free_cash,
                 "sym_params": {s: p.model_dump() for s, p in self.sym_params.items()},
+            "wanted": sorted(self.wanted), "never_stop": self.never_stop,
                 "engines": {sym: e.to_state() for sym, e in self.engines.items()},
                 "port_curve": self.port_curve, "bal_curve": self.bal_curve}   # хранить всю сессию (≤ _CURVE_CAP)
         try:
@@ -284,6 +300,14 @@ class LiveSession:
             self._persist()
 
     # ───────── независимые сетки: капитал ─────────
+    def account_money(self) -> float:
+        """Сколько денег на счёте СЕЙЧАС: свободные плюс лежащие в сетках.
+
+        Доли считаются от этой величины, а не от изначального депозита: после
+        убытков делить нужно то, что осталось, иначе сетке пообещают денег,
+        которых на счёте уже нет."""
+        return self.free_cash + sum(e.cash for e in self.engines.values())
+
     def _reclaim_spare(self, target: float) -> None:
         """Забрать у работающих сеток то, что превышает целевую долю И не занято
         обеспечением. Деньги под открытой позицией не трогаются — иначе позиция
@@ -308,7 +332,7 @@ class LiveSession:
             return
 
         running = sum(1 for x in self.engines.values() if x.active)
-        target = self.capital / (running + 1)
+        target = self.account_money() / (running + 1)
         self._reclaim_spare(target)
 
         need = max(0.0, target - e.alloc)
@@ -326,9 +350,9 @@ class LiveSession:
             return
 
         e.p = self.params_for(sym)
-        e.blocked_reason = ""         # новая попытка с новой долей капитала
-        e.ladder.installed = False
+        e.revive()                    # новая попытка с новой долей капитала
         e.start_strategy(e._last_price)
+        self.wanted.add(sym)
         self._sync_started()
         self._persist()
 
@@ -338,6 +362,7 @@ class LiveSession:
         e = self.engines.get(sym)
         if e is None:
             return
+        self.wanted.discard(sym)      # явная кнопка «Стоп» — единственное, что снимает торговлю
         e.stop_strategy()
         # Остановленная сетка не «заблокирована биржей» — она просто выключена.
         # Причину надо снять, иначе пара навсегда останется с отметкой
@@ -574,6 +599,75 @@ class LiveSession:
             # книг одновременно дорого, а без книги очередь просто не оценивается.
             if sym != sel:
                 e.ob_book = None
+
+    def revive_stopped(self) -> int:
+        """Поднять все сетки, которые встали сами. Возвращает число поднятых.
+
+        Три причины остановки — ликвидация, отказ биржи по минимальному лоту или
+        обеспечению, kill-switch по просадке. На бумажном счёте ни одна из них не
+        должна означать «утром смотреть не на что»: результат может быть каким
+        угодно, но он должен быть.
+
+        Что при этом НЕ подделывается: убыток остаётся убытком, ликвидация пишется
+        в журнал как ликвидация, обнулённая касса не восстанавливается сама.
+        Если после ликвидации у сетки не осталось денег, ей выдаётся доля
+        из свободных — и это тоже пишется в журнал, чтобы утренняя цифра читалась
+        правильно, а не выглядела как прибыль из ниоткуда."""
+        revived = 0
+        for sym in sorted(self.wanted):
+            e = self.engines.get(sym)
+            if e is None or e.active or e._last_price <= 0:
+                continue
+            why = e.revive()
+
+            # Ликвидация обнуляет кассу. Без денег торговать нечем — берём долю
+            # так же, как при обычном запуске: сгоревшая аллокация списывается,
+            # у работающих сеток забирается НЕЗАНЯТОЕ (обеспечение под открытыми
+            # позициями не трогается), остаток добирается из свободных.
+            added = 0.0
+            if e.cash <= 1e-9:
+                e.alloc = 0.0                  # прежняя доля сгорела вместе с позицией
+                running = sum(1 for x in self.engines.values() if x.active)
+                target = self.account_money() / max(1, running + 1)
+                self._reclaim_spare(target)
+                added = min(self.free_cash, target)
+                e.alloc += added
+                e.cash += added
+                self.free_cash -= added
+            if e.cash <= 1e-9:
+                # Денег не осталось нигде: счёт исчерпан. Это тоже результат,
+                # и он должен быть виден, а не выглядеть как «ничего не произошло».
+                if not any(x.action == "Торговать нечем" for x in e.events[-3:]):
+                    e.events.append(StepEvent(0, "Торговать нечем", e._last_price,
+                                              0, 0, 0,
+                                              "весь счёт израсходован, свободных денег нет"))
+                continue
+
+            e.start_strategy(e._last_price)
+            if not e.active:                   # биржа снова отказала — попробуем позже
+                continue
+            revived += 1
+            note = why or "остановка снята"
+            if added > 0:
+                note += f", довнесено ${added:.2f} из свободных"
+            e.events.append(StepEvent(0, "Торговля возобновлена", e._last_price,
+                                      0, 0, 0, note))
+        if revived:
+            self._sync_started()
+            self._persist()
+        return revived
+
+    async def _revive_loop(self):
+        """Раз в полминуты поднимать всё, что встало. Реже нельзя — ночь длинная;
+        чаще незачем — попытка стоит установки лестницы."""
+        while self.running:
+            await asyncio.sleep(30)
+            if not self.never_stop:
+                continue
+            try:
+                self.revive_stopped()
+            except Exception:
+                pass
 
     async def _persist_loop(self):
         while self.running:

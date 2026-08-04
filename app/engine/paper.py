@@ -808,6 +808,33 @@ class PaperEngine:
         self.events.append(StepEvent(0, "Старт стратегии", price, 0, 0, 0,
                                      f"сетка выставлена: {n} уровней ({self.p.mode})"))
 
+    def revive(self, ts: int = 0) -> str:
+        """Снять ЛЮБУЮ остановку и разрешить торговать снова.
+
+        Счёт бумажный: он и создан для того, чтобы рисковать без потерь. Останавливать
+        его навсегда из-за ликвидации, минимального лота или просадки — значит утром
+        показать не результат, а пустой экран. Причина остановки при этом не стирается:
+        она возвращается строкой и попадает в журнал, чтобы результат остался честным.
+
+        На реальном счёте так делать нельзя — там ликвидация терминальна. Поэтому
+        подъём выполняет только живая бумажная сессия, а не сам движок в бэктесте.
+        """
+        why = []
+        if self.liquidated:
+            why.append("после ликвидации")
+            self.liquidated = False
+        if self.halted:
+            why.append("после kill-switch по просадке")
+            self.halted = False
+        if self.blocked_reason:
+            why.append(f"после отказа биржи ({self.blocked_reason})")
+            self.blocked_reason = ""
+        self.rejected_min_qty = 0
+        self.rejected_margin = 0
+        self.ladder.installed = False
+        self.peak_equity = self.cash + self.unrealized_money(self._last_price)
+        return ", ".join(why)
+
     def stop_strategy(self) -> None:
         """Остановить стратегию: снять все сеточные ордера (ручные остаются)."""
         self.active = False
