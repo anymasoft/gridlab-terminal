@@ -985,8 +985,23 @@ function initChart(){
     borderUpColor:'#1F8A5B', borderDownColor:'#C4453A', wickUpColor:'#1F8A5B', wickDownColor:'#C4453A',
     priceLineColor:'#C98A1A', priceLineStyle:2, lastValueVisible:true });
   S._chart=ch; S._cs=cs; S._chartReady=false;
-  // клик по графику НЕ ставит лимитку (клик/драг = навигация по графику).
-  // Ручная лимитка ставится только кликом по цене в стакане (узкая область справа).
+  // Постановка лимитки кликом по графику. Раньше её тут не было намеренно: на графике
+  // зажатая кнопка мыши — это прокрутка, и обработчик клика конфликтовал с ней. Отличаем
+  // одно от другого по факту: КЛИК — это нажатие без сдвига (< 5 px) и не дольше 400 мс.
+  // Всё, что длиннее или со сдвигом, остаётся протяжкой графика и до нас не доходит.
+  if(!host._placeBound){
+    host._placeBound=1;
+    let dn=null;
+    host.addEventListener('mousedown',(e)=>{ if(e.button!==0) return; dn={x:e.clientX,y:e.clientY,t:Date.now()}; });
+    host.addEventListener('mouseup',(e)=>{
+      if(!dn) return; const d=dn; dn=null;
+      if(Math.abs(e.clientX-d.x)>4 || Math.abs(e.clientY-d.y)>4) return;   // это была протяжка
+      if(Date.now()-d.t>400) return;                                        // это было удержание
+      const r=chartRect(); if(!r) return;
+      const pr=yToPrice(e.clientY-r.top);
+      if(pr>0) openDraft(pr);
+    });
+  }
   ch.timeScale().subscribeVisibleLogicalRangeChange(()=>{
     repositionLines(); repositionDraft();
   });
