@@ -24,11 +24,11 @@ from ..marketdata import bybit
 from ..marketdata.orderbook import OrderBookFeed
 from ..marketdata.archive import ArchiveWriter
 from ..models import Candle, GridParams, Position
-from ..portfolio.manager import _action_color, _fmt_price, risk_parity_alloc
+from ..portfolio.manager import _action_color, _fmt_price
 from ..strategy.indicators import Indicators
 from ..analytics import metrics as _M
 from .costmodel import CostModel
-from .paper import PaperEngine
+from .paper import PaperEngine, StepEvent
 from .queue_fill import book_queue_ahead
 
 _INTERVAL_MS = {"1": 60_000, "5": 300_000, "15": 900_000, "30": 1_800_000,
@@ -80,6 +80,11 @@ class LiveSession:
         self.specs: dict[str, dict] = {}        # tickSize / qtyStep / minOrderQty по символам
         self._trade_seen: dict[str, float] = {}  # когда последний раз пришла реальная сделка
         self.state = {"selected": None, "started": False}
+        # Сетки независимы: у каждой пары свои параметры и своя доля капитала.
+        # Общий у них только счёт — деньги, не выданные ни одной сетке, лежат
+        # в free_cash и достаются той, которую запустят следующей.
+        self.sym_params: dict[str, GridParams] = {}
+        self.free_cash = float(settings.start_capital)
         self.ob_state = {"sym": None, "data": None}
         self.ob_feed: OrderBookFeed | None = None   # живой L2-стакан по WS (блок B)
         self.archiver: ArchiveWriter | None = None  # фоновый архив L2+сделок (блок E)
@@ -119,9 +124,12 @@ class LiveSession:
         # Шаг цены, шаг лота и минимальный объём — чтобы бумажный счёт не выставлял
         # заявок, которых биржа бы не приняла.
         self.specs = await bybit.fetch_many_meta(syms, self.s)
-        allocs = risk_parity_alloc(cmap, self.capital)
+        # Капитал НЕ размазывается по корзине заранее: незапущенная сетка денег
+        # не занимает. Долю она получает в момент запуска — поэтому одна пара
+        # может взять весь счёт, и минимальный лот перестаёт быть препятствием.
+        self.free_cash = self.capital
         for sym in syms:
-            e = PaperEngine(sym, allocs[sym], self.params, self.cost, self.fmap.get(sym),
+            e = PaperEngine(sym, 0.0, self.params, self.cost, self.fmap.get(sym),
                             spec=self.specs.get(sym))
             e.warm(cmap[sym])
             e.last_funding_ts = cmap[sym][-1].ts
@@ -160,11 +168,10 @@ class LiveSession:
         if not (cap > 0) or not self.engines:
             return
         self.capital = cap
-        allocs = risk_parity_alloc(self.hist, cap)
-        n = len(self.engines)
+        self.free_cash = cap        # весь счёт свободен: сетки берут долю при запуске
         for sym, e in self.engines.items():
-            e.alloc = allocs.get(sym, cap / n)
-            e.cash = e.alloc
+            e.alloc = 0.0
+            e.cash = 0.0
             e.pos = Position()
             e.orders = []
             e.fills = []
@@ -174,6 +181,10 @@ class LiveSession:
             e.trades = 0
             e.liquidated = False
             e.active = False
+            e.blocked_reason = ""     # новый счёт — прежние биржевые отказы неактуальны
+            e.rejected_min_qty = 0
+            e.rejected_margin = 0
+            e.ladder.installed = False
             e._uid = 0
             e.reset_mm()
             e.halted = False
@@ -202,11 +213,38 @@ class LiveSession:
         sel = data.get("selected")
         if sel in self.engines:
             self.state["selected"] = sel
+        for sym, sp in (data.get("sym_params") or {}).items():
+            with contextlib.suppress(Exception):
+                self.sym_params[sym] = GridParams(**sp)
         for sym, st in (data.get("engines") or {}).items():
             e = self.engines.get(sym)
             if e:
                 with contextlib.suppress(Exception):
                     e.load_state(st)
+                    if "alloc" in st:
+                        e.alloc = float(st["alloc"])
+                    else:
+                        # Состояние старого формата: alloc в нём не хранился, он
+                        # выводился из risk-parity по всей корзине. Восстанавливаем
+                        # его из инварианта кассы, иначе PnL сетки поедет на всю
+                        # выданную ей сумму.
+                        e.alloc = (e.cash - e.pos.realized
+                                   + e.pos.fees_paid + e.pos.funding_paid)
+                e.p = self.params_for(sym)
+
+        if "free_cash" in data:
+            self.free_cash = float(data["free_cash"])
+        else:
+            # Переход с общей risk-parity раскладки на независимые сетки: деньги
+            # незапущенных пар без позиций возвращаются в свободные. Суммарный
+            # баланс от этого не меняется — меняется только то, где он лежит.
+            self.free_cash = 0.0
+            for e in self.engines.values():
+                if not e.active and abs(e.pos.qty) < 1e-12 and not e.orders:
+                    self.free_cash += e.cash
+                    e.cash = 0.0
+                    e.alloc = 0.0
+        self._sync_started()
         self.port_curve = list(data.get("port_curve") or [])
         self.bal_curve = list(data.get("bal_curve") or [])
 
@@ -214,6 +252,8 @@ class LiveSession:
         data = {"interval": self.interval, "started": self.state["started"],
                 "capital": self.capital, "selected": self.state["selected"],
                 "params": self.params.model_dump(),
+                "free_cash": self.free_cash,
+                "sym_params": {s: p.model_dump() for s, p in self.sym_params.items()},
                 "engines": {sym: e.to_state() for sym, e in self.engines.items()},
                 "port_curve": self.port_curve, "bal_curve": self.bal_curve}   # хранить всю сессию (≤ _CURVE_CAP)
         try:
@@ -241,30 +281,105 @@ class LiveSession:
             e.cancel_manual(int(oid))
             self._persist()
 
-    def start_strategy(self):
-        self.state["started"] = True
-        for e in self.engines.values():
-            if e._last_price > 0:
-                e.start_strategy(e._last_price)
+    # ───────── независимые сетки: капитал ─────────
+    def _reclaim_spare(self, target: float) -> None:
+        """Забрать у работающих сеток то, что превышает целевую долю И не занято
+        обеспечением. Деньги под открытой позицией не трогаются — иначе позиция
+        осталась бы без покрытия."""
+        for x in self.engines.values():
+            if not x.active:
+                continue
+            spare = min(x.alloc - target, x.cash - x.locked_capital())
+            if spare > 1e-9:
+                x.alloc -= spare
+                x.cash -= spare
+                self.free_cash += spare
+
+    def start_strategy(self, sym: str | None = None):
+        """Запустить сетку на ОДНОМ инструменте. Сетки независимы: у каждой свои
+        параметры и своя доля капитала, общий только счёт."""
+        sym = sym or self.state["selected"]
+        e = self.engines.get(sym)
+        if e is None or e.active or e._last_price <= 0:
+            return
+        if e.liquidated:
+            return
+
+        running = sum(1 for x in self.engines.values() if x.active)
+        target = self.capital / (running + 1)
+        self._reclaim_spare(target)
+
+        need = max(0.0, target - e.alloc)
+        give = min(self.free_cash, need)
+        if give > 0:
+            e.alloc += give           # alloc и cash растут вместе: это довнесение,
+            e.cash += give            # а не прибыль — PnL от него не смещается
+            self.free_cash -= give
+
+        if e.alloc <= 0:
+            e.events.append(StepEvent(
+                0, "Нет свободных денег", e._last_price, 0, 0, 0,
+                "весь капитал занят другими сетками — остановите одну из них"))
+            self._persist()
+            return
+
+        e.p = self.params_for(sym)
+        e.blocked_reason = ""         # новая попытка с новой долей капитала
+        e.ladder.installed = False
+        e.start_strategy(e._last_price)
+        self._sync_started()
         self._persist()
 
-    def stop_strategy(self):
-        self.state["started"] = False
-        for e in self.engines.values():
-            e.stop_strategy()
+    def stop_strategy(self, sym: str | None = None):
+        """Остановить одну сетку и вернуть в свободные всё, что не держит позицию."""
+        sym = sym or self.state["selected"]
+        e = self.engines.get(sym)
+        if e is None:
+            return
+        e.stop_strategy()
+        # Остановленная сетка не «заблокирована биржей» — она просто выключена.
+        # Причину надо снять, иначе пара навсегда останется с отметкой
+        # «не торгуется», даже когда ей дадут достаточно денег.
+        e.blocked_reason = ""
+        back = max(0.0, e.cash - e.locked_capital())
+        if back > 1e-9:
+            e.cash -= back
+            e.alloc = max(0.0, e.alloc - back)
+            self.free_cash += back
+        self._sync_started()
         self._persist()
 
-    def apply_params_live(self, params: dict):
-        """Сохранить параметры стратегии в работающую сессию (без реконнекта) и сразу
-        переставить сетку активных движков под новые параметры. Это «Сохранить», не «Запуск»."""
+    def stop_all(self):
+        for sym in list(self.engines):
+            self.stop_strategy(sym)
+
+    def _sync_started(self):
+        """«Сессия торгует» = работает хотя бы одна сетка."""
+        self.state["started"] = any(x.active for x in self.engines.values())
+
+    def params_for(self, sym: str) -> GridParams:
+        """Параметры конкретной сетки. Пока их не меняли — общий шаблон."""
+        return self.sym_params.get(sym) or self.params
+
+    def apply_params_live(self, params: dict, sym: str | None = None):
+        """Сохранить параметры ОДНОЙ сетки и сразу переставить её уровни.
+
+        Параметры принадлежат паре, а не сессии: у BTC может быть шаг 0.5%,
+        у DOGE — 2%. Это «Сохранить», не «Запуск»."""
         try:
             gp = GridParams(**params)
         except Exception:
             return
-        self.apply_params(gp)   # ставит e.p и персистит
-        for e in self.engines.values():
-            if e.active and not e.liquidated and e._last_price > 0:
-                e._install_grid(e._last_price, 0)   # тут же применить новые уровни/режим
+        sym = sym or self.state["selected"]
+        e = self.engines.get(sym)
+        if e is None:
+            return
+        self.sym_params[sym] = gp
+        self.params = gp            # шаблон для пар, которым параметры ещё не задавали
+        e.p = gp
+        if e.active and not e.liquidated and e._last_price > 0:
+            e.ladder.installed = False          # шаг мог измениться — лестницу ставим заново
+            e._install_grid(e._last_price, 0)
         self._persist()
 
     def handle(self, msg: dict):
@@ -276,11 +391,13 @@ class LiveSession:
         elif act == "cancel_order":
             self.cancel_order(msg.get("symbol"), msg.get("oid"))
         elif act == "apply_params":
-            self.apply_params_live(msg.get("params") or {})
+            self.apply_params_live(msg.get("params") or {}, msg.get("symbol"))
         elif act == "start":
-            self.start_strategy()
+            self.start_strategy(msg.get("symbol"))
         elif act == "stop_strategy":
-            self.stop_strategy()
+            self.stop_strategy(msg.get("symbol"))
+        elif act == "stop_all":
+            self.stop_all()
         elif act == "reset_account":
             self.reset_account(msg.get("capital"))
         # action "stop" игнорируем: сессия работает всегда, как биржа
@@ -320,8 +437,11 @@ class LiveSession:
                     now = time.monotonic()
                     if now - self._last_broadcast >= 0.33:
                         self._last_broadcast = now
-                        total_eq = sum(en.equity() for en in self.engines.values())
-                        total_bal = sum(en.cash for en in self.engines.values())
+                        # Свободные деньги — часть счёта. Без них кривая эквити
+                        # проваливается в ноль, как только все сетки остановлены,
+                        # и просадка показывает -100% на ровном месте.
+                        total_eq = self.free_cash + sum(en.equity() for en in self.engines.values())
+                        total_bal = self.free_cash + sum(en.cash for en in self.engines.values())
                         self.port_curve.append(round(total_eq, 2))
                         self.bal_curve.append(round(total_bal, 2))
                         if len(self.port_curve) > _CURVE_CAP:
@@ -425,7 +545,7 @@ class LiveSession:
                         except (KeyError, TypeError, ValueError):
                             continue
                         self._trade_seen[sym] = time.monotonic()
-                        if e.liquidated or not self.state["started"]:
+                        if e.liquidated or not e.active:
                             continue
                         try:
                             e.process_trade(price, size, side, ts)
@@ -440,7 +560,7 @@ class LiveSession:
         sel = self.state["selected"]
         for sym, e in self.engines.items():
             fresh = (now - self._trade_seen.get(sym, 0.0)) <= _TRADE_STALE_S
-            e.trade_driven = bool(fresh and self.state["started"])
+            e.trade_driven = bool(fresh and e.active)
             # L2-книга (позиция в очереди) — только у выбранного: держать десять
             # книг одновременно дорого, а без книги очередь просто не оценивается.
             if sym != sel:
@@ -465,13 +585,15 @@ class LiveSession:
         engines = self.engines
         if not engines:
             return {"type": "frame", "live": True, "selected": None}
-        total_eq = sum(e.equity() for e in engines.values())
+        # Свободные деньги — часть счёта: они не выданы ни одной сетке, но лежат
+        # на нём. Без этого слагаемого остановка сетки выглядела бы как потеря денег.
+        total_eq = self.free_cash + sum(e.equity() for e in engines.values())
         total_real = sum(e.pos.realized for e in engines.values())
         total_unreal = sum(e.pos.unrealized(e._last_price) for e in engines.values())
         total_fees = sum(e.pos.fees_paid for e in engines.values())
         total_fund = sum(e.pos.funding_paid for e in engines.values())
         open_ord = sum(len(e.orders) for e in engines.values())
-        balance = sum(e.cash for e in engines.values())
+        balance = self.free_cash + sum(e.cash for e in engines.values())
         roi = (total_eq - self.capital) / self.capital * 100.0 if self.capital else 0.0
         peak, dd = (self.port_curve[0] if self.port_curve else total_eq), 0.0
         for v in self.port_curve:
@@ -489,8 +611,14 @@ class LiveSession:
                 # Заблокированный биржевыми ограничениями инструмент обязан
                 # доезжать до интерфейса и в ЖИВОЙ сессии, а не только в бэктесте:
                 # иначе человек видит инструмент без сетки и без объяснения.
+                # «Заблокирован» — состояние ЗАПУЩЕННОЙ сетки, которую не приняла
+                # биржа. У выключенной пары такой отметки быть не должно: она не
+                # «не торгуется», она просто не запущена.
                 "status": ("stop" if e.liquidated
-                           else "blocked" if e.blocked_reason else "active"),
+                           else "blocked" if (e.blocked_reason and not e.orders
+                                              and e.alloc > 0)
+                           else "active" if e.active else "idle"),
+                "started": e.active,
                 "blocked": e.blocked_reason,
                 "min_order_usd": sm["min_order_usd"],
                 "trades": e.trades,
@@ -507,7 +635,7 @@ class LiveSession:
                 for o in se.orders if not o.manual]
         # превью следующих уровней сетки (на шаг за текущими) — только при запущенной стратегии
         preview = []
-        if self.state["started"] and not se.liquidated and se._last_price > 0:
+        if se.active and not se.liquidated and se._last_price > 0:
             step = se._grid_step(se._last_price)
             gbuys = [o.price for o in se.orders if not o.manual and o.side == "buy"]
             gsells = [o.price for o in se.orders if not o.manual and o.side == "sell"]
@@ -582,8 +710,13 @@ class LiveSession:
 
         return {
             "type": "frame", "live": True, "selected": sel,
-            "started": self.state["started"],
-            "params": self.params.model_dump(),
+            # «started» в кадре — состояние ВЫБРАННОЙ сетки: кнопка вверху
+            # управляет именно ей, а не всей корзиной.
+            "started": se.active,
+            "any_started": self.state["started"],
+            "free_cash": round(self.free_cash, 2),
+            # Параметры ВЫБРАННОЙ сетки: панель «Параметры» правит её, а не сессию.
+            "params": se.p.model_dump(),
             "capital": round(self.capital, 2),
             "price": se._last_price,
             "dash": {"balance": round(balance, 2), "equity": round(total_eq, 2),

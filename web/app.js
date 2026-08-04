@@ -256,7 +256,7 @@ function topBar(){
     <button id="btnLive" class="hov" data-tip="Реальное время: тянет свежие свечи Bybit, график двигается, бумажный движок торгует вживую." style="font-size:12px;font-weight:500;border:1px solid #e3e6e0;background:#fff;border-radius:6px;padding:5px 10px;cursor:pointer;color:#C98A1A;">● Live</button>
     <button id="btnStop" class="hov" data-tip="Сброс: остановить и очистить сделки, вернуть чистый график." style="font-size:12px;font-weight:500;border:1px solid #e3e6e0;background:#fff;border-radius:6px;padding:5px 10px;cursor:pointer;color:#5b635e;">Reset</button>
     <span style="width:1px;height:22px;background:#e3e6e0;"></span>
-    <button id="btnStrat" data-tip="Запустить/остановить grid-стратегию. До запуска автоматических лимиток нет — только ручные. При запуске выставляется многоуровневая адаптивная сетка (число уровней = «Кол-во уровней»/«Max ордеров»); шаг и центр смещаются по инвентарю, сетка перестраивается при срабатываниях." style="font-size:12px;font-weight:600;border-radius:6px;padding:5px 12px;cursor:pointer;${stratOn()?'background:#fbecea;color:#a93529;border:1px solid #f0c8c4;':'background:#e7f3ec;color:#157a4f;border:1px solid #cfe7d9;'}">${stratOn()?'Стоп стратегии':'Старт стратегии'}</button>
+    <button id="btnStrat" data-tip="Запустить/остановить сетку НА ВЫБРАННОЙ ПАРЕ. Сетки независимы: у каждой свои параметры и своя доля капитала, общий только счёт. При запуске пара берёт долю из свободных денег, при остановке возвращает всё, что не держит позицию. При запуске выставляется многоуровневая адаптивная сетка (число уровней = «Кол-во уровней»/«Max ордеров»); шаг и центр смещаются по инвентарю, сетка перестраивается при срабатываниях." style="font-size:12px;font-weight:600;border-radius:6px;padding:5px 12px;cursor:pointer;${stratOn()?'background:#fbecea;color:#a93529;border:1px solid #f0c8c4;':'background:#e7f3ec;color:#157a4f;border:1px solid #cfe7d9;'}">${stratOn()?'Стоп · '+S.selInst:'Старт · '+S.selInst}</button>
     <span style="width:1px;height:22px;background:#e3e6e0;"></span>
     <div style="display:flex;align-items:center;gap:4px;">
       <span style="font-size:10px;letter-spacing:.04em;color:#939a93;font-weight:600;">СЧЁТ $</span>
@@ -304,7 +304,12 @@ function leftPanel(){
 
 function leftHeadHTML(){
   const d=dash(); const roiColor = d.roi>=0?C.green:C.red;
-  return `$1 000 → <b style="color:${roiColor};">$${d.equity.toFixed(2)}</b> <span style="color:${roiColor};">${d.roi>=0?'+':''}${d.roi}%</span>`;
+  // Свободные деньги — те, что не выданы ни одной сетке. Их надо видеть:
+  // именно из них следующая запускаемая пара берёт свою долю.
+  const free = (S.streamMode==='live' && S.live && S.live.free_cash!=null)
+    ? `<div class="mono" style="font-size:10px;color:#939a93;margin-top:3px;">свободно $${S.live.free_cash.toFixed(2)}</div>` : '';
+  const cap = S.cfg?S.cfg.start_capital:1000;
+  return `$${cap.toFixed(0)} → <b style="color:${roiColor};">$${d.equity.toFixed(2)}</b> <span style="color:${roiColor};">${d.roi>=0?'+':''}${d.roi}%</span>${free}`;
 }
 
 function instRowsHTML(){
@@ -318,7 +323,7 @@ function instRowsHTML(){
       <div style="flex:1;min-width:0;">
         <div style="display:flex;align-items:center;gap:6px;">
           <span class="mono" style="font-size:12px;font-weight:600;">${inst.sym}</span>
-          <span style="width:5px;height:5px;border-radius:50%;background:${inst.status==='stop'?C.liq:inst.status==='blocked'?'#C98A1A':C.accent};flex:0 0 auto;"></span>
+          <span style="width:5px;height:5px;border-radius:50%;background:${inst.status==='stop'?C.liq:inst.status==='blocked'?'#C98A1A':inst.status==='idle'?'#c9cec8':C.accent};flex:0 0 auto;"></span>
         </div>
         <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
           <span class="mono" style="font-size:11px;color:${pos?C.green:C.red};font-weight:500;">${pos?'+$':'-$'}${Math.abs(inst.pnl).toFixed(2)}</span>
@@ -326,7 +331,9 @@ function instRowsHTML(){
         </div>
         ${inst.status==='blocked'
           ? `<div class="mono" data-tip="Биржа не примет такую заявку: ${inst.blocked}. Минимальный ордер по этому инструменту — $${(inst.min_order_usd||0).toFixed(2)}, а сетка выставляет $${(inst.alloc/10).toFixed(2)}. Увеличьте капитал, уменьшите число уровней или исключите инструмент из корзины." style="font-size:9.5px;color:#C98A1A;margin-top:3px;">не торгуется · мин. ордер $${(inst.min_order_usd||0).toFixed(2)}</div>`
-          : `<div class="mono" style="font-size:9.5px;color:#aab0a9;margin-top:3px;">$${inst.alloc.toFixed(0)} · ${inst.orders} орд · ${inst.status==='stop'?'стоп':'активен'}</div>`}
+          : inst.status==='idle'
+          ? `<div class="mono" style="font-size:9.5px;color:#aab0a9;margin-top:3px;">сетка не запущена</div>`
+          : `<div class="mono" style="font-size:9.5px;color:#aab0a9;margin-top:3px;">$${inst.alloc.toFixed(0)} · ${inst.orders} орд · ${inst.status==='stop'?'стоп':'работает'}</div>`}
       </div>
       <svg viewBox="0 0 56 18" style="width:52px;height:17px;flex:0 0 auto;"><path d="${sparkPath(inst.spark)}" fill="none" stroke="${sc}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
     </div>`;
@@ -359,7 +366,7 @@ function centerPanel(){
   const cards = cardsHTML();
   const eqc=eqCurve();
   const eqLast = eqc? '$'+eqc[eqc.length-1].toFixed(2) : '$'+ (S.cfg?S.cfg.start_capital.toFixed(2):'1000');
-  const dragHint = stratOn()? ' · стратегия запущена: сплошные — активные лимитки, пунктир — превью следующих уровней' : ' · нажми «Старт стратегии», чтобы выставить сетку';
+  const dragHint = stratOn()? ' · стратегия запущена: сплошные — активные лимитки, пунктир — превью следующих уровней' : ' · сетка не запущена — нажми «Старт · '+S.selInst+'»';
   // Заблокированный инструмент обязан объясняться НА ГРАФИКЕ. Раньше причина
   // жила только в панели портфеля, а она сворачивается — и человек видел пустой
   // график без сетки без единого намёка почему.
@@ -876,7 +883,7 @@ function bind(){
     if(S.streamMode==='live'){
       if(!S.ws || S.ws.readyState!==1){ toast('Нет соединения с Live'); return; }
       S.paramsSynced=true;                                   // наши параметры — приоритет
-      S.ws.send(JSON.stringify({action:'apply_params', params:S.params}));
+      S.ws.send(JSON.stringify({action:'apply_params', params:S.params, symbol:S.selInst}));
       S._paramsDirty=false; setParamsBtnDirty(false);
       const b=$('btnApply'); if(b){ b.textContent='Сохранено'; b.style.background='#1F8A5B'; setTimeout(()=>{const x=$('btnApply'); if(x){x.textContent='Сохранить параметры';}},1400); }
       toast(`Параметры сохранены: ${S.params.mode==='avellaneda'?'A-S':'эвристика'}, ${S.params.levels} ур.`);
@@ -887,9 +894,11 @@ function bind(){
   bindBtn('btnStop',()=>stopAll());
   bindBtn('btnStrat',()=>{
     if(S.streamMode!=='live' || !S.ws || S.ws.readyState!==1){ toast('Сначала включи Live (● Live)'); return; }
-    const on=stratOn();
-    S.ws.send(JSON.stringify({action: on?'stop_strategy':'start'}));
-    toast(on?'Стратегия остановлена — сеточные ордера сняты':`Стратегия запущена — многоуровневая сетка (${S.params.levels} ур.) выставлена`);
+    const on=stratOn(), sym=S.selInst;
+    // Сетки независимы: кнопка управляет ТОЛЬКО выбранной парой.
+    S.ws.send(JSON.stringify({action: on?'stop_strategy':'start', symbol:sym}));
+    toast(on?`${sym}: сетка снята, деньги вернулись в свободные`
+            :`${sym}: сетка выставляется на свободные деньги счёта`);
   });
   bindBtn('btnNewAcct',()=>{
     if(S.streamMode!=='live' || !S.ws || S.ws.readyState!==1){ toast('Сначала включи Live (● Live)'); return; }
@@ -1262,7 +1271,7 @@ function liveApply(){
   // перевесить клики по инструментам (innerHTML заменил узлы)
   if(il) il.querySelectorAll('[data-inst]').forEach(el=>el.onclick=()=>selectInst(el.dataset.inst));
   const bs=$('btnStrat'); if(bs){ const on=stratOn();
-    bs.textContent=on?'Стоп стратегии':'Старт стратегии';
+    bs.textContent=(on?'Стоп · ':'Старт · ')+S.selInst;
     bs.style.cssText='font-size:12px;font-weight:600;border-radius:6px;padding:5px 12px;cursor:pointer;'+
       (on?'background:#fbecea;color:#a93529;border:1px solid #f0c8c4;':'background:#e7f3ec;color:#157a4f;border:1px solid #cfe7d9;');
   }

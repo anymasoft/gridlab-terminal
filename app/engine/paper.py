@@ -314,6 +314,17 @@ class PaperEngine:
                                  for o in self.orders if o.side == "sell")
         return max(abs(pos_notional + buys), abs(pos_notional - sells))
 
+    def locked_capital(self) -> float:
+        """Сколько денег инструмента нельзя забрать обратно в свободные.
+
+        Это обеспечение под открытую позицию и уже стоящие заявки. Забрать
+        больше — значит оставить позицию без покрытия, чего биржа бы не позволила.
+        Нужно при перераспределении капитала между независимыми сетками."""
+        px = self._last_price
+        if px <= 0:
+            return 0.0
+        return self._margin_used(px)
+
     def _margin_used(self, price: float) -> float:
         """Начальная маржа, занятая позицией и уже выставленными заявками.
 
@@ -910,6 +921,10 @@ class PaperEngine:
     def to_state(self) -> dict:
         return {
             "cash": self.cash,
+            # Доля капитала, выданная этой сетке. Она больше не выводится из
+            # risk-parity по всей корзине — сетка получает деньги при запуске
+            # и возвращает при остановке, поэтому её надо хранить.
+            "alloc": self.alloc,
             "pos": {"qty": self.pos.qty, "avg_entry": self.pos.avg_entry,
                     "realized": self.pos.realized, "fees_paid": self.pos.fees_paid,
                     "funding_paid": self.pos.funding_paid},
