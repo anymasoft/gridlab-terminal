@@ -26,7 +26,25 @@ class Quoter:
         self.last_step: float = 0.0   # реальный шаг последней построенной сетки (для панели)
 
     def step_size(self, center: float, ind: Indicators, p: GridParams) -> float:
+        """Расстояние между уровнями.
+
+        В режиме 'grid' шаг по умолчанию задаётся в ПРОЦЕНТАХ от цены и потому не
+        зависит от таймфрейма графика: 1% — это 1% и на минутках, и на часах. Прежний
+        режим 'atr' (шаг = grid_spacing × ATR) оставлен переключателем: он адаптируется
+        к волатильности, но привязывает стратегию к выбранному масштабу — переключение
+        1m→15m меняло ATR примерно в десять раз и перестраивало всю лестницу.
+
+        Режимы маркет-мейкинга (avellaneda/heuristic) всегда считают шаг от ATR:
+        там дистанция котировок — часть модели, а не пользовательская настройка."""
         atr = (ind.atr_smooth or ind.atr) or center * 0.005
+        if p.mode == "grid":
+            if p.grid_step_mode == "abs" and p.grid_step_abs > 0:
+                self.last_step = p.grid_step_abs
+            elif p.grid_step_mode == "pct" and p.grid_step_pct > 0:
+                self.last_step = center * p.grid_step_pct / 100.0
+            else:
+                self.last_step = max(p.grid_spacing, 0.1) * atr
+            return self.last_step
         self.last_step = max(p.grid_spacing, 0.1) * atr
         return self.last_step
 

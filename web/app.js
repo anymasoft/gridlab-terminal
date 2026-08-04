@@ -30,6 +30,9 @@ S.book = { asks:new Map(), bids:new Map(), my:{aheadDisp:0}, imbDisp:0.5,
 // подсказки к параметрам (shadcn-like тултипы)
 const TIPS = {
   mode:'Грид (по умолчанию): уровни стоят НЕПОДВИЖНО, купленный на уровне лот продаётся лимиткой на уровень выше — прибыль снимается с колебания цены. Эвристика и Avellaneda-Stoikov — маркет-мейкинг: котировки перецентрируются на текущую цену после каждого исполнения, что в тренде превращается в погоню за ценой.',
+  grid_step_mode:'Чем задан шаг лестницы. «В % цены» (по умолчанию) и «в деньгах» НЕ зависят от таймфрейма графика: 1% — это 1% и на минутках, и на часах, поэтому переключение масштаба больше не перестраивает сетку. «От ATR» — прежнее поведение: шаг подстраивается под волатильность выбранного таймфрейма. Шаг в деньгах осмыслен только для одного инструмента: на корзине $100 несопоставимы между BTC и DOGE.',
+  grid_step_pct:'Расстояние между уровнями в процентах от цены. Каждый round-trip приносит примерно этот процент минус две maker-комиссии. Слишком мелкий шаг = много сделок с малой прибылью, и доля комиссии растёт.',
+  grid_step_abs:'Расстояние между уровнями в деньгах котировки. Осмысленно для работы по одному инструменту.',
   grid_spacing:'Шаг сетки в единицах ATR. Безразмерный (k×ATR), а не в %/$ — чтобы параметр был сравним между инструментами. Больше k = реже ордера, меньше комиссий.',
   levels:'Сколько ордеров с каждой стороны. 2 = по одному (1 buy + 1 sell) — основной режим. Больше = лесенка дальше от цены (ловит только быстрые прострелы за один тик). На скорость набора и риск влияет «Max ордеров» (потолок инвентаря), а на то, как шаг расширяется при наборе позиции — γ (риск-аверсия) в режиме A-S.',
   order_usd:'Размер одного ордера в долларах (нотионал). Количество в монете считается как $ / цена. Например $80 при BTC≈66800 ≈ 0.0012 BTC.',
@@ -447,8 +450,8 @@ function paramsDrawer(){
 const PARAM_PRESETS = {
   // A и B — классический грид: широкий шаг = редкие сделки и больше прибыли на сделку,
   // узкий = чаще оборот. Комиссия фиксирована, поэтому слишком узкий шаг съедает эдж.
-  A: {mode:'grid', grid_spacing:2.0, grid_levels:10, grid_notional_mult:1.0, grid_reanchor:0, sl:0, max_drawdown_pct:0},
-  B: {mode:'grid', grid_spacing:0.8, grid_levels:16, grid_notional_mult:1.0, grid_reanchor:0, sl:0, max_drawdown_pct:0},
+  A: {mode:'grid', grid_step_mode:'pct', grid_step_pct:1.5, grid_levels:10, grid_notional_mult:1.0, grid_reanchor:0, sl:0, max_drawdown_pct:0},
+  B: {mode:'grid', grid_step_mode:'pct', grid_step_pct:0.5, grid_levels:16, grid_notional_mult:1.0, grid_reanchor:0, sl:0, max_drawdown_pct:0},
   // C — маркет-мейкинг для сравнения: та же корзина, но с перецентровкой котировок.
   C: {mode:'avellaneda', grid_spacing:1.8, order_usd:80, as_gamma:0.3, as_kappa:500, as_horizon:200, max_orders:10, sl:0, max_drawdown_pct:0},
 };
@@ -510,12 +513,24 @@ function rightPanel(){
       </div>
     </div>
     <div style="padding:0 14px;display:flex;flex-direction:column;">
-      ${paramRow('Grid Spacing (ATR ×)','grid_spacing',0.1,0.1,10)}
+      ${p.mode==='grid'?`
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid #eef0ec;">
+        <span style="font-size:12px;color:#5b635e;display:flex;align-items:center;">Шаг задаётся${qq('grid_step_mode')}</span>
+        <select id="stepModeSel" class="mono" style="width:104px;font-size:11px;background:#fff;border:1px solid #e3e6e0;border-radius:6px;padding:5px 8px;cursor:pointer;">
+          <option value="pct" ${p.grid_step_mode==='pct'?'selected':''}>в % цены</option>
+          <option value="abs" ${p.grid_step_mode==='abs'?'selected':''}>в деньгах</option>
+          <option value="atr" ${p.grid_step_mode==='atr'?'selected':''}>от ATR</option>
+        </select>
+      </div>`:''}
       ${p.mode==='grid'
-        ? paramRow('Уровней лестницы','grid_levels',1,2,50)
+        ? (p.grid_step_mode==='pct' ? paramRow('Шаг, % от цены','grid_step_pct',0.05,0.05,20)
+           : p.grid_step_mode==='abs' ? paramRow('Шаг, $','grid_step_abs',1,0,1000000)
+           : paramRow('Grid Spacing (ATR ×)','grid_spacing',0.1,0.1,10))
+          + paramRow('Уровней лестницы','grid_levels',1,2,50)
           + paramRow('Нотионал (× капитала)','grid_notional_mult',0.1,0.1,10)
           + paramRow('Ре-анкор (0 = выкл)','grid_reanchor',0.25,0,5)
-        : paramRow('Кол-во уровней','levels',1,2,30)
+        : paramRow('Grid Spacing (ATR ×)','grid_spacing',0.1,0.1,10)
+          + paramRow('Кол-во уровней','levels',1,2,30)
           + paramRow('Размер ордера ($)','order_usd',10,1,100000)
           + paramRow('Max ордеров','max_orders',1,2,50)}
       ${paramRow('EMA-фильтр','ema',1,5,200)}
@@ -806,6 +821,10 @@ function bind(){
   document.querySelectorAll('[data-tab]').forEach(el=>el.onclick=()=>{S.tab=el.dataset.tab; saveUI(); render();});
   document.querySelectorAll('[data-spd]').forEach(el=>el.onclick=()=>{S.speed=+el.dataset.spd; render();});
   document.querySelectorAll('[data-mode]').forEach(el=>el.onclick=()=>{S.params.mode=el.dataset.mode; S._activePreset=null; saveUI(); resetGrid(); render();});
+  const sm=$('stepModeSel'); if(sm) sm.onchange=()=>{
+    S.params.grid_step_mode=sm.value; S._activePreset=null; S._paramsDirty=true;
+    saveUI(); render(); setParamsBtnDirty(true);
+  };
   document.querySelectorAll('[data-preset]').forEach(el=>el.onclick=()=>applyPreset(el.dataset.preset));
   document.querySelectorAll('[data-param]').forEach(el=>el.onchange=()=>{
     const k=el.dataset.param; const v=parseFloat(el.value);

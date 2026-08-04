@@ -264,6 +264,17 @@ class PaperEngine:
     def _place_pair(self, side: str, price: float, qty: float, ts: int) -> None:
         """Выставить парную заявку после исполнения: купили на уровне — продаём на
         уровень выше, и наоборот. Это и есть съём прибыли в гриде; перецентровки нет."""
+        if not self.ladder.installed:
+            # Страховка. Состояние лестницы могло не восстановиться — например, сессия
+            # была сохранена версией, которая его ещё не писала, а ордера при этом
+            # восстановились. Тогда pair() вернул бы None, парный take-profit не встал бы,
+            # и сетка молча выродилась бы в односторонний набор входов: позиция растёт
+            # до потолка, продажи нет. Шаг в этом случае берём из параметров.
+            step = self.quoter.step_size(price, self.ind, self.p)
+            if step > 0:
+                self.ladder.center = price
+                self.ladder.step = step
+                self.ladder.installed = True
         q = self.ladder.pair(side, price, qty)
         if q is None or q.price <= 0 or q.size <= 0:
             return
@@ -760,6 +771,13 @@ class PaperEngine:
             "uid": self._uid,
             "orders": [{"side": o.side, "price": o.price, "size": o.size, "level": o.level,
                         "manual": o.manual, "oid": o.oid} for o in self.orders],
+            # Центр и шаг лестницы обязаны пережить рестарт вместе с ордерами: без них
+            # GridLadder поднимается неустановленной, pair() возвращает None, и филл
+            # сеточной заявки перестаёт порождать парный take-profit — сетка молча
+            # превращается в набор односторонних входов.
+            "ladder": {"center": self.ladder.center, "step": self.ladder.step,
+                       "installed": self.ladder.installed,
+                       "n": self.ladder.n, "side": self.ladder.side},
         }
 
     def load_state(self, st: dict) -> None:
@@ -780,6 +798,13 @@ class PaperEngine:
         self.orders = [_OpenOrder(o["side"], o["price"], o["size"], o.get("level", 0),
                                   o.get("manual", False), o.get("oid", 0))
                        for o in st.get("orders", [])]
+        lad = st.get("ladder") or {}
+        if lad.get("installed") and lad.get("step", 0) > 0:
+            self.ladder.center = float(lad["center"])
+            self.ladder.step = float(lad["step"])
+            self.ladder.n = int(lad.get("n", self.ladder.n))
+            self.ladder.side = lad.get("side", self.ladder.side)
+            self.ladder.installed = True
 
     # ───────── сводка ─────────
     def unrealized_money(self, mark: float) -> float:

@@ -169,6 +169,103 @@ def test_grid_sell_fill_restores_buy_level():
         f"уровень {top_buy} должен вернуться в лестницу, есть {buys}"
 
 
+# ─────────────────────────── шаг не зависит от таймфрейма ───────────────────────────
+def _warm(e, atr_scale):
+    """Прогреть индикаторы свечами заданного размаха — имитация разных таймфреймов:
+    на 15m свеча в разы шире, чем на 1m, а значит и ATR."""
+    base, cs = 100.0, []
+    for i in range(60):
+        o = base + (i % 5) * 0.1 * atr_scale
+        c = o + (0.2 if i % 2 else -0.2) * atr_scale
+        cs.append(Candle(ts=1_700_000_000_000 + i * 60_000,
+                         o=o, h=o + 0.5 * atr_scale, l=o - 0.5 * atr_scale, c=c, v=10.0))
+    e.warm(cs)
+    return e
+
+
+def test_pct_step_is_independent_of_timeframe():
+    """ГЛАВНОЕ по этой правке: шаг в процентах одинаков на любом таймфрейме.
+    Раньше шаг был grid_spacing × ATR, и переключение 1m→15m меняло ATR примерно
+    в десять раз — вместе со всей лестницей."""
+    thin = _warm(_engine(grid_step_mode="pct", grid_step_pct=1.0), atr_scale=1.0)
+    wide = _warm(_engine(grid_step_mode="pct", grid_step_pct=1.0), atr_scale=10.0)
+    assert wide.ind.atr > thin.ind.atr * 3, "контроль: ATR должен заметно отличаться"
+
+    px = 100.0
+    s1 = thin.quoter.step_size(px, thin.ind, thin.p)
+    s2 = wide.quoter.step_size(px, wide.ind, wide.p)
+    assert abs(s1 - s2) < 1e-9, f"шаг разъехался при разном ATR: {s1} vs {s2}"
+    assert abs(s1 - 1.0) < 1e-9, f"шаг 1% от цены 100 должен быть 1.0, получено {s1}"
+
+
+def test_atr_step_does_depend_on_timeframe():
+    """Контроль обратного: режим 'atr' сохраняет прежнее поведение — шаг едет за ATR.
+    Он оставлен переключателем, а не удалён."""
+    thin = _warm(_engine(grid_step_mode="atr"), atr_scale=1.0)
+    wide = _warm(_engine(grid_step_mode="atr"), atr_scale=10.0)
+    s1 = thin.quoter.step_size(100.0, thin.ind, thin.p)
+    s2 = wide.quoter.step_size(100.0, wide.ind, wide.p)
+    assert s2 > s1 * 3, f"режим atr обязан следовать за ATR: {s1} vs {s2}"
+
+
+def test_abs_step_is_exact_money():
+    e = _warm(_engine(grid_step_mode="abs", grid_step_abs=100.0), atr_scale=5.0)
+    assert abs(e.quoter.step_size(64000.0, e.ind, e.p) - 100.0) < 1e-9
+
+
+def test_ladder_levels_use_fixed_pct_step():
+    """Уровни реальной лестницы стоят ровно на шаге в % — проверяем сквозь движок."""
+    e = _warm(_engine(grid_step_mode="pct", grid_step_pct=1.0, grid_side="neutral"),
+              atr_scale=3.0)
+    e.start_strategy(100.0)
+    buys = sorted(o.price for o in e.orders if o.side == "buy" and not o.manual)
+    assert len(buys) >= 2
+    gap = buys[-1] - buys[-2]
+    assert abs(gap - 1.0) < 1e-6, f"шаг между уровнями должен быть 1.0, получено {gap}"
+
+
+# ─────────────────────────── состояние переживает рестарт ───────────────────────────
+def test_ladder_state_survives_restart():
+    """Центр и шаг лестницы обязаны сохраняться вместе с ордерами. Иначе после
+    рестарта pair() возвращает None и филл перестаёт порождать парный take-profit —
+    сетка молча вырождается в набор односторонних входов."""
+    e = _engine(grid_side="long")
+    e.start_strategy(e._last_price)
+    st = e.to_state()
+    assert st["ladder"]["installed"] and st["ladder"]["step"] > 0
+
+    fresh = _engine(grid_side="long")
+    fresh.load_state(st)
+    assert fresh.ladder.installed, "лестница должна восстановиться как установленная"
+    assert abs(fresh.ladder.step - e.ladder.step) < 1e-12
+    assert abs(fresh.ladder.center - e.ladder.center) < 1e-12
+
+    q = fresh.ladder.pair("buy", 100.0, 1.0)
+    assert q is not None and q.side == "sell", "после рестарта парный TP должен строиться"
+    assert abs(q.price - (100.0 + e.ladder.step)) < 1e-9
+
+
+def test_pair_recovers_when_ladder_state_missing():
+    """Страховка на сессию, сохранённую версией БЕЗ состояния лестницы: ордера
+    восстановились, а центр и шаг — нет. Парная заявка обязана встать всё равно,
+    иначе сетка вырождается в односторонний набор входов (позиция растёт, продаж нет)."""
+    e = _engine(grid_side="long", grid_step_mode="pct", grid_step_pct=1.0)
+    e.start_strategy(e._last_price)
+    st = e.to_state()
+    st.pop("ladder")                       # состояние из старого формата
+
+    fresh = _engine(grid_side="long", grid_step_mode="pct", grid_step_pct=1.0)
+    fresh.load_state(st)
+    assert not fresh.ladder.installed, "контроль: лестница не должна восстановиться"
+
+    fresh.active = True
+    before = len(fresh.orders)
+    fresh._place_pair("buy", 100.0, 1.0, ts=1)
+    assert fresh.ladder.installed, "лестница должна восстановиться на лету"
+    sells = [o for o in fresh.orders if o.side == "sell" and abs(o.price - 101.0) < 1e-9]
+    assert sells, f"парный TP на 101.0 не выставлен; ордеров было {before}, стало {len(fresh.orders)}"
+
+
 # ─────────────────────────── сайзинг и плечо ───────────────────────────
 def test_order_size_scales_with_allocation():
     """Размер ордера обязан зависеть от аллокации инструмента. Раньше стояла
