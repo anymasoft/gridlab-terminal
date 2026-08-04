@@ -234,3 +234,49 @@ def test_new_account_stops_everything_for_good():
     sess.reset_account(1000)
     assert not sess.wanted, "после сброса счёта торговать никто не просил"
     assert sess.revive_stopped() == 0
+
+
+# ─────────────── видимость потерь ───────────────
+def test_liquidation_is_counted_and_the_burn_recorded():
+    """Ноль на счёте после одной ликвидации и после пяти выглядит одинаково.
+    Счётчик и сумма сгоревшего — единственное, что их различает."""
+    e = PaperEngine("T", 100.0, GridParams(), CostModel.from_settings(S), None)
+    e._last_price = 100.0
+    e.warm(_candles())
+    e.active = True
+    e._apply_fill("buy", 30.0, 100.0, True, 1, "")     # позиция много больше обеспечения
+    e.mark_price = 90.0
+    assert e._check_liquidation(2, 90.0), "контроль: тут обязана быть ликвидация"
+
+    assert e.liq_count == 1
+    assert e.liq_burned > 0, "сгоревшие деньги не записаны"
+    assert e.equity() >= -1e-9, "эквити не может уйти ниже нуля при изолированной марже"
+
+
+def test_revive_does_not_erase_the_history_of_losses():
+    """Подъём возвращает торговлю, но не стирает память о том, что ночь была тяжёлой."""
+    e = PaperEngine("T", 100.0, GridParams(), CostModel.from_settings(S), None)
+    e._last_price = 100.0
+    e.liq_count, e.liq_burned = 3, 742.5
+    e.liquidated = True
+    e.revive()
+    assert e.liq_count == 3 and e.liq_burned == 742.5
+
+
+def test_liquidation_counters_survive_restart():
+    e = PaperEngine("T", 100.0, GridParams(), CostModel.from_settings(S), None)
+    e._last_price = 100.0
+    e.liq_count, e.liq_burned = 4, 1273.0
+    fresh = PaperEngine("T", 100.0, GridParams(), CostModel.from_settings(S), None)
+    fresh.load_state(e.to_state())
+    assert fresh.liq_count == 4 and fresh.liq_burned == 1273.0
+
+
+def test_account_cannot_go_below_the_deposit():
+    """Дно счёта — минус весь депозит, как на реальной бирже при изолированной
+    марже. Показать убыток глубже внесённого значило бы соврать про реальный счёт."""
+    sess = _session()
+    sess.start_strategy("AAAUSDT")
+    _liquidate(sess, "AAAUSDT")
+    assert sess.account_money() >= -1e-9
+    assert sess.account_money() - sess.capital >= -sess.capital - 1e-9

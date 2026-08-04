@@ -848,6 +848,12 @@ class LiveSession:
                      "max_leverage": se.max_leverage,
                      "margin_used": round(se.locked_capital(), 2),
                      "liq_price": round(se.liquidation_price(), 6),
+                     # Итог ночи по всей корзине: сколько денег ушло со счёта
+                     # и сколько раз выносило. Ноль на счёте после одной
+                     # ликвидации и после пяти — очень разные ночи.
+                     "pnl_total": round(total_eq - self.capital, 2),
+                     "liq_count": sum(e.liq_count for e in engines.values()),
+                     "liq_burned": round(sum(e.liq_burned for e in engines.values()), 2),
                      "funding": round(total_fund, 2)},
             "instruments": instruments,
             "roundtrips": [

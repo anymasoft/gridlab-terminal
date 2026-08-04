@@ -111,6 +111,11 @@ class PaperEngine:
         self.roundtrips: list[dict] = []
         self.last_funding_ts = 0
         self.liquidated = False
+        # Сколько раз инструмент выносило и сколько денег на этом сгорело.
+        # Без счётчика утренний ноль на счёте выглядит одинаково и после одной
+        # ликвидации, и после пяти подряд, а это очень разные ночи.
+        self.liq_count = 0
+        self.liq_burned = 0.0
         self.active = False       # стратегия запущена явно? до этого — только ручные ордера
         self._uid = 0
         self._last_price = 0.0
@@ -268,6 +273,11 @@ class PaperEngine:
             r = self._apply_fill(side, qty, fp, is_maker=False, ts=ts, note="liquidation")
             self.liquidated = True
             self.active = False                               # ← котирование прекращается навсегда
+            self.liq_count += 1
+            # Сгорело = всё, что было в сетке на момент выноса. Отрицательная касса
+            # (убыток глубже обеспечения) считается тоже: её забирает страховой фонд
+            # биржи, но со счёта эти деньги ушли.
+            self.liq_burned += max(0.0, self.alloc - self.cash) if self.cash < self.alloc                 else 0.0
             if self.cash < 0.0:
                 self.cash = 0.0                               # изолированная маржа: минус не переносится
             self.events.append(StepEvent(ts, "Ликвидация ⚠", fp, qty,
@@ -832,6 +842,8 @@ class PaperEngine:
         self.rejected_min_qty = 0
         self.rejected_margin = 0
         self.ladder.installed = False
+        # liq_count и liq_burned намеренно НЕ сбрасываются: подъём не стирает
+        # историю потерь, иначе утренняя цифра скроет, что ночь была тяжёлой
         self.peak_equity = self.cash + self.unrealized_money(self._last_price)
         return ", ".join(why)
 
@@ -1073,6 +1085,7 @@ class PaperEngine:
             # и в интерфейсе он выглядит «активен · 0 орд» без единого объяснения,
             # почему сетки нет.
             "roundtrips": self.roundtrips[-200:],
+            "liq_count": self.liq_count, "liq_burned": self.liq_burned,
             "step_tf": self.step_tf,
             "blocked_reason": self.blocked_reason,
             "rejected_min_qty": self.rejected_min_qty,
@@ -1112,6 +1125,8 @@ class PaperEngine:
             if not self.orders:
                 self.ladder.installed = False
         self.roundtrips = list(st.get("roundtrips") or [])
+        self.liq_count = int(st.get("liq_count", 0))
+        self.liq_burned = float(st.get("liq_burned", 0.0))
         self.step_tf = st.get("step_tf", "")
         self.blocked_reason = st.get("blocked_reason", "")
         self.rejected_min_qty = st.get("rejected_min_qty", 0)

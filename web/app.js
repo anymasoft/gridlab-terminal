@@ -165,7 +165,7 @@ function dash(){
   if(S.streamMode==='live' && S.live) return S.live.dash;
   if(S.tradingStarted && S.result){
     const r=S.result;
-    return {balance:r.balance,equity:r.equity,roi:r.roi,drawdown:r.drawdown,realized:r.realized,unrealized:r.unrealized,open_orders:r.open_orders,trades:r.trades,pos_qty:r.pos_qty,pos_avg:r.pos_avg,last_net:r.last_net,fees:r.fees,funding:r.funding};
+    return {balance:r.balance,equity:r.equity,roi:r.roi,drawdown:r.drawdown,realized:r.realized,unrealized:r.unrealized,open_orders:r.open_orders,trades:r.trades,pnl_total:r.pnl_total,liq_count:r.liq_count,liq_burned:r.liq_burned,pos_qty:r.pos_qty,pos_avg:r.pos_avg,last_net:r.last_net,fees:r.fees,funding:r.funding};
   }
   const cap=S.cfg?S.cfg.start_capital:1000;
   return {balance:cap,equity:cap,roi:0,drawdown:0,realized:0,unrealized:0,open_orders:0,trades:0,fees:0,funding:0};
@@ -354,6 +354,22 @@ function card(label,val,color,tip){
     <span class="mono" style="font-size:13.5px;font-weight:600;margin-top:2px;${color?'color:'+color+';':''}">${val}</span></div>`;
 }
 
+function lossCard(d){
+  // Главная цифра ночи в деньгах: сколько счёт заработал или потерял с начала.
+  // Проценты рядом есть, но «-$1000» читается прямее, чем «-100%».
+  if(d.pnl_total==null) return '';
+  const liq=d.liq_count||0;
+  let tip='Изменение счёта с начала: эквити минус внесённый депозит. '+
+    'Ниже нуля счёт уйти не может — при изолированной марже потеря ограничена внесёнными деньгами, '+
+    'ровно как на реальной бирже. Дно — минус весь депозит.';
+  if(liq) tip += ` За сессию ликвидаций: ${liq}, сгорело $${(d.liq_burned||0).toFixed(2)}. `+
+    'После каждой торговля возобновляется на то, что осталось на счёте.';
+  return card('ИТОГ СЧЁТА', (d.pnl_total>=0?'+':'')+fmt(d.pnl_total).replace('-',''),
+    d.pnl_total>=0?C.green:C.red, tip)
+    + (liq? card('ЛИКВИДАЦИЙ', String(liq), C.red,
+        `Сгорело $${(d.liq_burned||0).toFixed(2)}. Торговля после каждой возобновлялась автоматически.`) : '');
+}
+
 function posCard(d){
   // «Что у меня сейчас куплено и почём» — прямой аналог открытой позиции на ФОРТС.
   // Пока пара не закрыта, деньги по ней сидят в UNREAL.
@@ -377,6 +393,7 @@ function cardsHTML(){
     card('DRAWDOWN','-'+d.drawdown+'%',C.red),
     card('REALIZED',fmt(d.realized),d.realized>=0?C.green:C.red),
     card('UNREAL.',fmt(d.unrealized),d.unrealized>=0?C.green:C.red),
+    lossCard(d),
     posCard(d),
     card('ПОСЛ. СДЕЛКА', d.last_net!=null?fmt(d.last_net):'—',
       d.last_net==null?null:(d.last_net>=0?C.green:C.red),
