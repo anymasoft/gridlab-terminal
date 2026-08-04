@@ -103,6 +103,8 @@ class PaperEngine:
         self.requote_sigma = 0.5                 # ... или при относительном изменении σ
         # ── блок F: метрики MM (разложение PnL спред/инвентарь, fill-rate, markout, инвентарь) ──
         self.mm_spread_px = 0.0      # Σ signed·(mid_at_fill − price) в ЦЕНЕ (×mult при отчёте) — спред-доход (мейкер-эдж)
+        self.mm_spread_n = 0         # по скольким филлам была ИЗВЕСТНА середина книги.
+                                     # 0 → разложение спред/инвентарь недостоверно (нет L2)
         self.mm_posted = 0           # выставлено сеточных заявок (для fill-rate)
         self.mm_filled = 0           # исполнено сеточных заявок
         self.inv_curve: list[float] = []   # инвентарь во времени
@@ -118,12 +120,17 @@ class PaperEngine:
     # ───────── позиция (неттинг) ─────────
     def _apply_fill(self, side: str, qty: float, price: float, is_maker: bool,
                     ts: int, note: str, mid: float | None = None) -> float:
-        """Применить исполнение. Возвращает реализованный PnL этой сделки.
-        mid — справедливая середина на момент филла (live: mid книги; тик/тейкер: =price).
-        Разложение PnL: спред-доход = Σ signed·(mid−price); инвентарный = M·qty − Σ signed·mid."""
+        """Применить исполнение. Возвращает реализованный ЦЕНОВОЙ PnL этой сделки.
+
+        mid — справедливая середина книги на момент филла. Передаётся ТОЛЬКО когда она
+        реально известна (live, есть L2-книга). В бэктесте книги нет, и подставлять
+        вместо неё цену пробившего тика нельзя: для buy-лимитки такой «mid» всегда
+        не выше цены заявки, и спред-доход выходит структурно отрицательным. Поэтому
+        при mid=None разложение просто не накапливается — см. mm_metrics."""
         signed = qty if side == "buy" else -qty
-        m = price if mid is None else mid
-        self.mm_spread_px += signed * (m - price)      # спред-доход: мейкер купил ниже / продал выше mid
+        if mid is not None:
+            self.mm_spread_px += signed * (mid - price)   # мейкер купил ниже / продал выше mid
+            self.mm_spread_n += 1
         notional = abs(qty) * price
         fee = self.cost.fee(notional, is_maker) * self.mult   # ×mult → деньги (₽ для фьючерса)
         realized = 0.0
@@ -134,24 +141,33 @@ class PaperEngine:
             if new_qty != 0:
                 pos.avg_entry = (pos.avg_entry * pos.qty + price * signed) / new_qty
             pos.qty = new_qty
+            pos.fees_open += fee            # комиссия входа — «сидит» в позиции до закрытия
         else:
             # сокращение/разворот
             closing = min(abs(signed), abs(pos.qty))
             realized = closing * (price - pos.avg_entry) * (1 if pos.qty > 0 else -1) * self.mult
-            pos.realized += realized
-            self.cash += realized
+            pos.realized += realized        # ЦЕНОВОЙ PnL, без комиссий — на нём держится
+            self.cash += realized           # сходимость эквити, трогать нельзя
             self.trades += 1
-            self.realized_pnls.append(realized)
+            # ЧИСТЫЙ результат round-trip: минус доля комиссии входа, приходящаяся на
+            # закрытый объём, и минус комиссия выхода за тот же объём. Именно он идёт
+            # в win rate / profit factor — иначе метрики завышены на величину издержек.
+            entry_fee_share = pos.fees_open * (closing / abs(pos.qty)) if pos.qty else 0.0
+            exit_fee_share = fee * (closing / abs(qty)) if qty else 0.0
+            pos.fees_open -= entry_fee_share
+            self.realized_pnls.append(realized - entry_fee_share - exit_fee_share)
             remaining = abs(signed) - closing
             pos.qty += signed
             if abs(pos.qty) < 1e-12:
                 pos.qty = 0.0
                 pos.avg_entry = 0.0
+                pos.fees_open = 0.0
             if remaining > 1e-12:
                 # разворот: старая позиция закрыта ПОЛНОСТЬЮ, остаток открывает новую
                 # позицию по ЦЕНЕ СДЕЛКИ → avg_entry сбрасывается на price (не остаётся старым)
                 pos.qty = remaining if signed > 0 else -remaining
                 pos.avg_entry = price
+                pos.fees_open = fee - exit_fee_share   # остаток комиссии — вход новой позиции
         self.cash -= fee
         pos.fees_paid += fee
         if signed > 0:
@@ -404,8 +420,12 @@ class PaperEngine:
         if self._add_grid_order(q.side, q.price, q.size, q.level):
             self.mm_posted += 1
 
-    def _ref_mid(self, fallback: float) -> float:
-        """Справедливая середина: mid живой книги (live), иначе fallback (цена тика)."""
+    def _ref_mid(self, fallback: float) -> float | None:
+        """Справедливая середина живой книги. None — если книги нет.
+
+        Возвращать вместо неё цену тика нельзя: та всегда по «нашу» сторону уровня,
+        и разложение PnL на спред и инвентарь получается ложным (спред-доход выходит
+        структурно отрицательным). Лучше честно не считать, чем считать неверно."""
         b = self.ob_book
         if b:
             bids = b.get("b") or []
@@ -414,7 +434,7 @@ class PaperEngine:
                 bb, ba = bids[0][0], asks[0][0]
                 if bb > 0 and ba > 0:
                     return (bb + ba) / 2.0
-        return fallback
+        return None
 
     def _resolve_markout(self, ts: int, price: float) -> None:
         """Разрешить созревшие markout-замеры: цена через mk_horizon_ms после филла,
@@ -549,9 +569,10 @@ class PaperEngine:
             if not crossed:
                 continue
             if o.manual:
-                self._consume(o, o.price, float("inf"), ts, manual=True, mid=price)
+                self._consume(o, o.price, float("inf"), ts, manual=True, mid=None)
             elif self.active:
-                if self._consume(o, o.price, float("inf"), ts, manual=False, mid=price) > 0 \
+                # mid=None: в тиковом пути книги нет, справедливую середину взять неоткуда
+                if self._consume(o, o.price, float("inf"), ts, manual=False, mid=None) > 0 \
                         and o.size <= 1e-12:
                     grid_filled = True   # перецентровка ТОЛЬКО при ПОЛНОМ филле (паритет с Live)
         return grid_filled
@@ -834,6 +855,7 @@ class PaperEngine:
     def reset_mm(self) -> None:
         """Обнулить аккумуляторы MM-метрик (новый счёт)."""
         self.mm_spread_px = 0.0
+        self.mm_spread_n = 0
         self.mm_posted = 0
         self.mm_filled = 0
         self.inv_curve = []
@@ -850,23 +872,29 @@ class PaperEngine:
           fill_rate     — исполнено/выставлено; avg_markout_bps<0 — adverse selection."""
         M = self._last_price
         total_price = self.pos.realized + self.unrealized_money(M)   # фактический ценовой PnL движка
-        spread = self.mm_spread_px * self.mult                       # доход от спреда (мейкер-эдж vs mid)
-        inv = total_price - spread                                   # остальное — инвентарный PnL (сходимость точная)
+        # Разложение на спред и инвентарь имеет смысл ТОЛЬКО если известна середина
+        # книги на момент филла. В бэктесте L2 нет — тогда отдаём None, а не число:
+        # ложная разбивка хуже отсутствующей. Сумма (total_price) верна всегда.
+        has_mid = self.mm_spread_n > 0
+        spread = (self.mm_spread_px * self.mult) if has_mid else None
+        inv = (total_price - spread) if has_mid else None
         fees = self.pos.fees_paid
         funding = self.pos.funding_paid
         markout_bps = (self.mk_sum / self.mk_n * 1e4) if self.mk_n else None
         adverse_rate = (self.mk_adverse / self.mk_n) if self.mk_n else None
         return {
-            "spread_pnl": round(spread, 4),
-            "inventory_pnl": round(inv, 4),
+            "spread_pnl": round(spread, 4) if has_mid else None,
+            "inventory_pnl": round(inv, 4) if has_mid else None,
+            "decomposition_available": has_mid,   # False → нет L2-книги, разбивка не считается
             "fees": round(fees, 4),
             "funding": round(funding, 4),
-            "net_pnl": round(spread + inv - fees - funding, 4),   # == equity − alloc (контроль)
-            "total_price_pnl": round(spread + inv, 4),
+            "net_pnl": round(total_price - fees - funding, 4),   # == equity − alloc (контроль)
+            "total_price_pnl": round(total_price, 4),
             "posted": self.mm_posted,
             "filled": self.mm_filled,
             "fill_rate": round(self.mm_filled / self.mm_posted, 4) if self.mm_posted else 0.0,
-            "avg_spread_per_fill": round(spread / self.mm_filled, 6) if self.mm_filled else 0.0,
+            "avg_spread_per_fill": (round(spread / self.mm_filled, 6)
+                                    if has_mid and self.mm_filled else None),
             "avg_markout_bps": round(markout_bps, 3) if markout_bps is not None else None,
             "adverse_rate": round(adverse_rate, 4) if adverse_rate is not None else None,
             "markout_n": self.mk_n,

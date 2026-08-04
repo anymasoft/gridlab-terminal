@@ -402,11 +402,18 @@ function bottomTab(){
   if(S.tab==='analytics'){
     if(!S.result) return '<div style="padding:14px;color:#939a93;font-size:12px;">Аналитика (Sharpe/Sortino/PF…) считается по завершённому прогону — нажми «Бэктест» для сводки за период.</div>';
     const r=S.result; const a=r.analytics;
-    const cell=(l,v,c)=>`<div style="border:1px solid #e3e6e0;border-radius:9px;padding:11px 13px;"><div style="font-size:9.5px;letter-spacing:.06em;color:#939a93;font-weight:600;">${l}</div><div class="mono" style="font-size:18px;font-weight:600;margin-top:5px;${c?'color:'+c+';':''}">${v}</div></div>`;
+    const cell=(l,v,c,sub,tip)=>`<div ${tip?`class="hov" data-tip="${tip}"`:''} style="border:1px solid #e3e6e0;border-radius:9px;padding:11px 13px;"><div style="font-size:9.5px;letter-spacing:.06em;color:#939a93;font-weight:600;">${l}</div><div class="mono" style="font-size:18px;font-weight:600;margin-top:5px;${c?'color:'+c+';':''}">${v}</div>${sub?`<div class="mono" style="font-size:9.5px;color:#aab0a9;margin-top:3px;">${sub}</div>`:''}</div>`;
+    // Годовой Sharpe и win rate показываем ВМЕСТЕ с их неопределённостью: на короткой
+    // выборке само число почти ничего не значит, а «7 ± 6» читается правильно.
+    const se=a.sharpe_se||0, days=a.sample_days||0;
+    const shSub=se?`± ${se} · выборка ${days} сут`:'';
+    const shTip=se?`Годовой Sharpe на выборке в ${days} суток. Стандартная ошибка ±${se} — если она сопоставима с самим значением, число статистически неотличимо от нуля и содержательного смысла не несёт.`:'';
+    const wrSub=(a.win_rate_lo!=null)?`95%: ${a.win_rate_lo}–${a.win_rate_hi}%`:'';
+    const wrTip='Доля прибыльных round-trip ПОСЛЕ вычета комиссий обеих ног. В скобках — 95%-интервал Уилсона: честная неопределённость на этом числе сделок.';
     return `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:10px;">
-      ${cell('SHARPE RATIO',a.sharpe)}${cell('SORTINO RATIO',a.sortino)}${cell('PROFIT FACTOR',a.profit_factor)}
-      ${cell('WIN RATE',a.win_rate+'%',a.win_rate>=50?C.green:C.red)}${cell('MAX DRAWDOWN','-'+a.max_dd+'%',C.red)}
-      ${cell('AVG TRADE',fmt(a.avg_trade),a.avg_trade>=0?C.green:C.red)}${cell('TOTAL TRADES',a.total_trades)}
+      ${cell('SHARPE RATIO',a.sharpe,null,shSub,shTip)}${cell('SORTINO RATIO',a.sortino)}${cell('PROFIT FACTOR',a.profit_factor,null,'после комиссий','Отношение суммы прибыльных сделок к сумме убыточных. Считается по ЧИСТОМУ результату — комиссии обеих ног уже вычтены.')}
+      ${cell('WIN RATE',a.win_rate+'%',a.win_rate>=50?C.green:C.red,wrSub,wrTip)}${cell('MAX DRAWDOWN','-'+a.max_dd+'%',C.red)}
+      ${cell('AVG TRADE',fmt(a.avg_trade),a.avg_trade>=0?C.green:C.red,'после комиссий')}${cell('TOTAL TRADES',a.total_trades)}
       ${cell('ИТОГ $1000→','$'+r.equity.toFixed(2),r.roi>=0?C.green:C.red)}
     </div>`;
   }

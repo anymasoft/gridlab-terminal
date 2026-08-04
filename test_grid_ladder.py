@@ -266,6 +266,46 @@ def test_pair_recovers_when_ladder_state_missing():
     assert sells, f"парный TP на 101.0 не выставлен; ордеров было {before}, стало {len(fresh.orders)}"
 
 
+# ─────────────── метрики считаются ЧИСТЫМИ ───────────────
+def test_trade_pnl_is_net_of_fees():
+    """Round-trip в метриках обязан быть ЧИСТЫМ: минус комиссия входа и выхода.
+    Иначе win rate и profit factor завышены ровно на величину издержек."""
+    e = _engine()
+    e._apply_fill("buy", 1.0, 100.0, is_maker=True, ts=1, note="")
+    fee_in = e.pos.fees_paid
+    assert e.pos.fees_open > 0, "комиссия входа должна остаться в позиции до закрытия"
+
+    e._apply_fill("sell", 1.0, 101.0, is_maker=True, ts=2, note="")
+    gross = 1.0 * (101.0 - 100.0)
+    fee_out = e.pos.fees_paid - fee_in
+    assert abs(e.pos.realized - gross) < 1e-9, "ценовой PnL должен остаться валовым"
+    assert len(e.realized_pnls) == 1
+    net = e.realized_pnls[0]
+    assert abs(net - (gross - fee_in - fee_out)) < 1e-9, \
+        f"в метрики должен идти чистый PnL {gross - fee_in - fee_out}, получено {net}"
+    assert net < gross, "чистый результат обязан быть меньше валового"
+    assert abs(e.pos.fees_open) < 1e-12, "после закрытия комиссия входа обнуляется"
+
+
+def test_net_pnl_can_flip_a_marginal_win_to_loss():
+    """Сделка, прибыль которой меньше комиссий, обязана считаться УБЫТОЧНОЙ."""
+    e = _engine()
+    e._apply_fill("buy", 1.0, 100.0, is_maker=True, ts=1, note="")
+    e._apply_fill("sell", 1.0, 100.0001, is_maker=True, ts=2, note="")   # почти безубыток
+    assert e.pos.realized > 0, "валовой PnL положителен"
+    assert e.realized_pnls[0] < 0, "но после комиссий сделка убыточна"
+
+
+def test_equity_convergence_unaffected_by_net_metrics():
+    """Контроль: чистые метрики не должны сдвинуть эквити — оно считается по ценовому
+    PnL и списанным комиссиям, а не по realized_pnls."""
+    e = _engine()
+    start = e.equity()
+    e._apply_fill("buy", 1.0, 100.0, is_maker=True, ts=1, note="")
+    e._apply_fill("sell", 1.0, 101.0, is_maker=True, ts=2, note="")
+    assert abs(e.equity() - (start + e.pos.realized - e.pos.fees_paid)) < 1e-9
+
+
 # ─────────────── биржевые ограничения инструмента ───────────────
 def _spec_engine(alloc=1000.0, spec=None, **kw):
     p = GridParams(mode="grid", grid_side=kw.pop("grid_side", "long"), **kw)

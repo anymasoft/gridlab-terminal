@@ -1,5 +1,15 @@
 """Метрики эффективности: Sharpe/Sortino/Profit Factor/Win Rate/Max DD/Avg Trade.
-Считаются из портфельной кривой эквити (по барам) и реализованных PnL сделок."""
+Считаются из портфельной кривой эквити (по барам) и реализованных PnL сделок.
+
+Два принципа, которые здесь важнее формул:
+
+1. `trade_pnls` приходят ЧИСТЫМИ — комиссии обеих ног уже вычтены движком. Раньше
+   в метрики шёл валовой PnL, и win rate с profit factor были завышены на величину
+   издержек.
+2. Рядом с каждой оценкой отдаётся её неопределённость: годовой Sharpe получает
+   стандартную ошибку и длину выборки, win rate — интервал Уилсона. На десяти сутках
+   Sharpe 7 ± 6 читается правильно, а просто «Sharpe 7» — нет.
+"""
 from __future__ import annotations
 
 import math
@@ -33,6 +43,16 @@ def compute(equity_curve: list[float], trade_pnls: list[float],
     sharpe = (mean / std * af) if std > 0 else 0.0
     sortino = (mean / downside * af) if downside > 0 else 0.0
 
+    # Годовой Sharpe на короткой выборке — почти шум. На 1000 барах 15m (десять суток)
+    # он легко выходит 7–8, и прочитать это как «стратегия великолепна» нельзя.
+    # Поэтому рядом отдаём стандартную ошибку и длину выборки: SE(SR) ≈ √((1+SR²/2)/n)
+    # для периодного SR, годовой — та же величина × коэффициент пересчёта.
+    k = len(rets)
+    sr_period = (mean / std) if std > 0 else 0.0
+    sharpe_se = (math.sqrt((1.0 + 0.5 * sr_period ** 2) / k) * af) if k > 1 else 0.0
+    bars_year = _BARS_PER_YEAR.get(str(interval), 35040)
+    sample_days = k / bars_year * 365.0 if bars_year else 0.0
+
     wins = [p for p in trade_pnls if p > 0]
     losses = [p for p in trade_pnls if p < 0]
     gross_win = sum(wins)
@@ -50,14 +70,20 @@ def compute(equity_curve: list[float], trade_pnls: list[float],
         if peak > 0:
             max_dd = max(max_dd, (peak - v) / peak)
 
+    lo, hi = wilson_ci(len(wins), len(trade_pnls))
     return {
         "sharpe": round(sharpe, 2),
+        "sharpe_se": round(sharpe_se, 2),      # ± к годовому Sharpe
+        "sample_days": round(sample_days, 1),  # на какой длине он посчитан
         "sortino": round(sortino, 2),
         "profit_factor": round(profit_factor, 2),
         "win_rate": round(win_rate, 1),
+        "win_rate_lo": round(lo * 100.0, 1),   # 95% интервал Уилсона: честная
+        "win_rate_hi": round(hi * 100.0, 1),   # неопределённость на малой выборке
         "max_dd": round(max_dd * 100.0, 2),
         "avg_trade": round(avg_trade, 2),
         "total_trades": len(trade_pnls),
+        "net_of_fees": True,   # trade_pnls приходят ЧИСТЫМИ, за вычетом комиссий обеих ног
     }
 
 
@@ -102,5 +128,6 @@ def _std(xs: list[float], mean: float) -> float:
 
 
 def _empty() -> dict:
-    return {"sharpe": 0.0, "sortino": 0.0, "profit_factor": 0.0, "win_rate": 0.0,
-            "max_dd": 0.0, "avg_trade": 0.0, "total_trades": 0}
+    return {"sharpe": 0.0, "sharpe_se": 0.0, "sample_days": 0.0, "sortino": 0.0,
+            "profit_factor": 0.0, "win_rate": 0.0, "win_rate_lo": 0.0, "win_rate_hi": 0.0,
+            "max_dd": 0.0, "avg_trade": 0.0, "total_trades": 0, "net_of_fees": True}

@@ -56,10 +56,20 @@ def test_pnl_decomposition_reconciles():
     assert e.trades > 0
 
 
-def test_spread_near_zero_in_candle_backtest():
-    """Свечной бэктест: mid=цена тика на филле -> спред-эджа нет (честно), даже отрицателен на гэпах."""
+def test_decomposition_unavailable_in_candle_backtest():
+    """В свечном бэктесте L2-книги нет, справедливую середину взять неоткуда — значит
+    разложение на спред и инвентарь НЕ СЧИТАЕТСЯ.
+
+    Раньше вместо mid подставлялась цена пробившего тик уровня. Для buy-лимитки такая
+    «середина» всегда не выше цены заявки, поэтому спред-доход выходил структурно
+    отрицательным (на контрольном прогоне −$1674 при ценовом PnL −$651) и вводил
+    в заблуждение. Честное «не считается» лучше уверенно неверного числа."""
     mm = _run_bt("avellaneda").mm_metrics()
-    assert mm["spread_pnl"] <= 0.001, f"в свечном бэктесте не должно быть положительного спред-дохода: {mm['spread_pnl']}"
+    assert mm["decomposition_available"] is False
+    assert mm["spread_pnl"] is None and mm["inventory_pnl"] is None
+    assert mm["avg_spread_per_fill"] is None
+    # Сумма при этом обязана остаться верной — на ней держится сходимость эквити.
+    assert isinstance(mm["total_price_pnl"], float)
 
 
 def test_spread_positive_with_live_book():

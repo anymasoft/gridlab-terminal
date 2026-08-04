@@ -126,9 +126,13 @@ class LogEvent:
 class Position:
     qty: float = 0.0        # >0 лонг, <0 шорт (нетто)
     avg_entry: float = 0.0
-    realized: float = 0.0
+    realized: float = 0.0   # ЦЕНОВОЙ PnL закрытых сделок, БЕЗ комиссий (для сходимости эквити)
     fees_paid: float = 0.0
     funding_paid: float = 0.0
+    fees_open: float = 0.0  # комиссии, уплаченные при НАБОРЕ текущей позиции. Нужны, чтобы
+                            # посчитать ЧИСТЫЙ результат round-trip: при закрытии часть этой
+                            # суммы относится на закрываемый объём. Без неё win rate и profit
+                            # factor считались бы по валовой прибыли и были бы завышены.
 
     def unrealized(self, mark: float) -> float:
         return self.qty * (mark - self.avg_entry)
