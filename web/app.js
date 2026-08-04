@@ -400,7 +400,9 @@ function chartHintHTML(){
   if(gi.step){
     const st = gi.step>=100 ? gi.step.toFixed(0) : gi.step>=1 ? gi.step.toFixed(2) : String(gi.step);
     s=' · шаг '+st+(gi.step_pct!=null?' ('+gi.step_pct+'%)':'');
-    if(gi.origin) s+=' = '+gi.origin;
+    // В процентном режиме процент уже назван — повторять «= 0.2% от цены»
+    // после «(0.2%)» незачем. Происхождение важно там, где оно неочевидно.
+    if(gi.origin && !/^[\d.]+% от цены$/.test(gi.origin)) s+=' = '+gi.origin;
   }
   return 'Grid · '+mode+s+' · сплошные — стоящие лимитки, пунктир — следующие уровни';
 }
