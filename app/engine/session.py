@@ -485,7 +485,14 @@ class LiveSession:
             instruments.append({
                 "sym": sym, "alloc": round(e.alloc, 2),
                 "pnl": round(sm["pnl"], 2), "pnl_pct": round(sm["pnl_pct"], 2),
-                "orders": len(e.orders), "status": "stop" if e.liquidated else "active",
+                "orders": len(e.orders),
+                # Заблокированный биржевыми ограничениями инструмент обязан
+                # доезжать до интерфейса и в ЖИВОЙ сессии, а не только в бэктесте:
+                # иначе человек видит инструмент без сетки и без объяснения.
+                "status": ("stop" if e.liquidated
+                           else "blocked" if e.blocked_reason else "active"),
+                "blocked": e.blocked_reason,
+                "min_order_usd": sm["min_order_usd"],
                 "trades": e.trades,
                 "spark": _downsample(e.equity_curve_live[-120:] or [e.alloc, e.equity()]),
             })

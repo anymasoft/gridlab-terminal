@@ -360,6 +360,30 @@ def test_ladder_respects_instrument_spec():
         assert abs(k - round(k)) < 1e-6, f"цена {o.price} не лежит на шаге тика 0.5"
 
 
+def test_blocked_reason_survives_restart():
+    """Причина блокировки обязана пережить рестарт.
+
+    Иначе получается тихая ловушка: лестница сохранена как installed, ордеров
+    ноль, _install_ladder после подъёма больше не вызывается — и в интерфейсе
+    инструмент выглядит «активен · 0 орд», хотя биржа его заявки не примет
+    никогда. Человек видит пустой график и не понимает, куда делась сетка."""
+    e = _spec_engine(alloc=100.0, spec={"tick_size": 0.0, "qty_step": 0.001,
+                                        "min_qty": 1.0})     # мин. лот заведомо неподъёмный
+    e.start_strategy(100.0)
+    assert e.blocked_reason, "контроль: инструмент обязан заблокироваться"
+    assert not e.orders
+
+    st = e.to_state()
+    assert st["blocked_reason"], "причина не попала в состояние"
+
+    fresh = _spec_engine(alloc=100.0, spec={"tick_size": 0.0, "qty_step": 0.001,
+                                            "min_qty": 1.0})
+    fresh.load_state(st)
+    assert fresh.blocked_reason == e.blocked_reason, \
+        "после рестарта инструмент выглядит рабочим, хотя торговать не может"
+    assert fresh.rejected_min_qty == e.rejected_min_qty
+
+
 # ─────────────── маржа под выставленные заявки ───────────────
 def test_open_orders_consume_margin():
     """Заявка, способная нарастить позицию, занимает обеспечение — как на бирже."""

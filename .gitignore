@@ -39,3 +39,4 @@ Thumbs.db
 
 # Локальная конфигурация Claude Code (абсолютные пути машины)
 .claude/
+research/cache/

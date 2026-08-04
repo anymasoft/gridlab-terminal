@@ -360,6 +360,13 @@ function centerPanel(){
   const eqc=eqCurve();
   const eqLast = eqc? '$'+eqc[eqc.length-1].toFixed(2) : '$'+ (S.cfg?S.cfg.start_capital.toFixed(2):'1000');
   const dragHint = stratOn()? ' · стратегия запущена: сплошные — активные лимитки, пунктир — превью следующих уровней' : ' · нажми «Старт стратегии», чтобы выставить сетку';
+  // Заблокированный инструмент обязан объясняться НА ГРАФИКЕ. Раньше причина
+  // жила только в панели портфеля, а она сворачивается — и человек видел пустой
+  // график без сетки без единого намёка почему.
+  const bi = portfolioList().find(x=>x.sym===S.selInst && x.status==='blocked');
+  const blockedNote = bi
+    ? `<span class="mono" data-tip="${bi.blocked}. Минимальный ордер по этому инструменту — $${(bi.min_order_usd||0).toFixed(2)}, а сетка выставляет $${(bi.alloc/Math.max(1,S.params.grid_levels||10)).toFixed(2)}. Увеличьте капитал, уменьшите число уровней или исключите инструмент из корзины." style="font-size:10px;color:#8a6100;background:#FFF4D6;border:1px solid #E8C97A;border-radius:4px;padding:2px 7px;pointer-events:auto;">сетки нет: ${bi.blocked} · нужен ордер от $${(bi.min_order_usd||0).toFixed(2)}</span>`
+    : '';
   return `
   <div style="flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden;">
     <div id="cardsRow" style="display:flex;gap:6px;padding:8px 10px;background:#fff;border-bottom:1px solid #e3e6e0;overflow-x:auto;flex:0 0 auto;">${cards}</div>
@@ -369,6 +376,7 @@ function centerPanel(){
         <span class="mono" style="font-size:12px;font-weight:600;">${S.selInst}</span>
         <span class="mono" style="font-size:10px;color:#939a93;background:#eef0ec;border-radius:4px;padding:2px 6px;">${tfLabel(S.tf)}</span>
         <span style="font-size:10px;color:#3B82CE;font-weight:500;">Grid · ${S.params.mode==='grid'?'классический грид':S.params.mode==='avellaneda'?'Avellaneda-Stoikov':'эвристика'}${dragHint}</span>
+        ${blockedNote}
       </div>
       <div id="lwchart" style="position:absolute;inset:0;"></div>
     </div>

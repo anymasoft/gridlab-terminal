@@ -929,6 +929,14 @@ class PaperEngine:
             "ladder": {"center": self.ladder.center, "step": self.ladder.step,
                        "installed": self.ladder.installed,
                        "n": self.ladder.n, "side": self.ladder.side},
+            # Причина блокировки обязана пережить рестарт вместе с лестницей.
+            # Иначе инструмент поднимается с installed=True и нулём ордеров:
+            # _install_ladder больше не вызывается, причина не восстанавливается,
+            # и в интерфейсе он выглядит «активен · 0 орд» без единого объяснения,
+            # почему сетки нет.
+            "blocked_reason": self.blocked_reason,
+            "rejected_min_qty": self.rejected_min_qty,
+            "rejected_margin": self.rejected_margin,
         }
 
     def load_state(self, st: dict) -> None:
@@ -956,6 +964,24 @@ class PaperEngine:
             self.ladder.n = int(lad.get("n", self.ladder.n))
             self.ladder.side = lad.get("side", self.ladder.side)
             self.ladder.installed = True
+            # Лестница, восстановленная без единой живой заявки, установленной
+            # не является. Помечаем её как неустановленную, чтобы движок попробовал
+            # выставить сетку заново — и либо выставил, либо честно записал причину,
+            # почему не может. Иначе инструмент навсегда зависает в состоянии
+            # «установлено, ордеров ноль, объяснений нет».
+            if not self.orders:
+                self.ladder.installed = False
+        self.blocked_reason = st.get("blocked_reason", "")
+        self.rejected_min_qty = st.get("rejected_min_qty", 0)
+        self.rejected_margin = st.get("rejected_margin", 0)
+        # Восстановление из состояния, записанного версией без blocked_reason:
+        # инструмент выключен, ордеров нет, ликвидации не было, причины тоже нет.
+        # Такой останавливается навсегда и молча. Даём ему ровно одну попытку
+        # выставиться заново — она либо сработает, либо запишет причину.
+        if (not self.active and not self.liquidated and not self.blocked_reason
+                and not self.orders):
+            self.active = True
+            self.ladder.installed = False
 
     # ───────── сводка ─────────
     def unrealized_money(self, mark: float) -> float:
