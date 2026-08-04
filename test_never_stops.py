@@ -40,15 +40,19 @@ def _candles(p0=100.0, n=200):
     return out
 
 
-def _session(capital=1000.0):
+def _session(capital=1000.0, unlimited=False):
+    """unlimited=False — счёт с дном, как на бирже (так работает бэктест).
+    unlimited=True — личный тестовый счёт без дна (так работает живая сессия)."""
     sess = LiveSession(S, GridParams(), "15")
     sess.capital = capital
     sess.free_cash = capital
     sess.cost = CostModel.from_settings(S)
+    sess.unlimited_loss = unlimited
     for sym in ("AAAUSDT", "BBBUSDT"):
         e = PaperEngine(sym, 0.0, GridParams(), sess.cost, None,
                         spec={"tick_size": 0.0, "qty_step": 0.0, "min_qty": 0.0})
         e.warm(_candles())
+        e.unlimited_loss = unlimited
         sess.engines[sym] = e
         sess.hist[sym] = _candles()
     sess.state["selected"] = "AAAUSDT"
@@ -104,7 +108,7 @@ def test_liquidated_grid_comes_back():
 
     Деньги берутся из того, что осталось на счёте: незанятое у работающих сеток
     плюс свободные. Обеспечение под их открытыми позициями не трогается."""
-    sess = _session()
+    sess = _session(unlimited=False)
     sess.start_strategy("AAAUSDT")
     sess.start_strategy("BBBUSDT")
     e = _liquidate(sess, "AAAUSDT")
@@ -118,7 +122,7 @@ def test_liquidated_grid_comes_back():
 def test_revival_after_liquidation_is_written_down_as_a_top_up():
     """Довнесение обязано быть видно в журнале: иначе утренняя цифра читается
     как прибыль из ниоткуда, хотя на деле сетку долили после ликвидации."""
-    sess = _session()
+    sess = _session(unlimited=False)
     sess.start_strategy("AAAUSDT")
     sess.start_strategy("BBBUSDT")
     e = _liquidate(sess, "AAAUSDT")
@@ -133,7 +137,7 @@ def test_revival_after_liquidation_is_written_down_as_a_top_up():
 def test_empty_account_says_so_instead_of_pretending():
     """Если счёт израсходован полностью, поднимать нечем — и это тоже результат.
     Он обязан быть назван, а не выглядеть как «ничего не произошло»."""
-    sess = _session()
+    sess = _session(unlimited=False)
     sess.start_strategy("AAAUSDT")          # одна сетка забрала весь счёт
     e = _liquidate(sess, "AAAUSDT")         # и сгорела вместе с ним
 
@@ -272,11 +276,98 @@ def test_liquidation_counters_survive_restart():
     assert fresh.liq_count == 4 and fresh.liq_burned == 1273.0
 
 
-def test_account_cannot_go_below_the_deposit():
-    """Дно счёта — минус весь депозит, как на реальной бирже при изолированной
-    марже. Показать убыток глубже внесённого значило бы соврать про реальный счёт."""
-    sess = _session()
+def test_exchange_mode_floors_the_account_at_zero():
+    """Режим с дном (бэктест, опубликованные результаты): потерять глубже
+    внесённого нельзя — так устроена изолированная маржа на бирже."""
+    sess = _session(unlimited=False)
     sess.start_strategy("AAAUSDT")
     _liquidate(sess, "AAAUSDT")
     assert sess.account_money() >= -1e-9
-    assert sess.account_money() - sess.capital >= -sess.capital - 1e-9
+
+
+# ─────────────── личный тестовый счёт: убыток без дна ───────────────
+def _drown(e, qty=30.0, entry=100.0, mark=60.0):
+    """Загнать инструмент в вынос по марже: крупная позиция и ход против неё."""
+    e.active = True
+    e._apply_fill("buy", qty, entry, True, 1, "")
+    e.mark_price = mark
+    e._last_price = mark
+    return e._check_liquidation(2, mark)
+
+
+def test_unlimited_loss_lets_the_account_go_negative():
+    """Личный тестовый счёт показывает ПОЛНЫЙ накопленный убыток, а не упёршийся
+    в ноль остаток: касса уходит в минус, и это ровно то число, которое на бирже
+    пришлось бы покрывать доливками."""
+    e = PaperEngine("T", 100.0, GridParams(), CostModel.from_settings(S), None)
+    e._last_price = 100.0
+    e.warm(_candles())
+    e.unlimited_loss = True
+    assert _drown(e), "контроль: вынос по марже обязан произойти"
+    assert e.cash < 0, f"касса обязана уйти в минус, получено {e.cash}"
+    assert e.equity() < -1e-9, "эквити обязано быть отрицательным"
+
+
+def test_unlimited_loss_keeps_trading_after_the_wipeout():
+    """Вынос закрывает позицию, но не останавливает торговлю и не помечает
+    инструмент ликвидированным навсегда."""
+    e = PaperEngine("T", 100.0, GridParams(), CostModel.from_settings(S), None)
+    e._last_price = 100.0
+    e.warm(_candles())
+    e.unlimited_loss = True
+    _drown(e)
+    assert not e.liquidated, "инструмент не должен остаться ликвидированным"
+    assert e.active, "торговля обязана продолжиться"
+    assert abs(e.pos.qty) < 1e-12, "позиция при этом закрыта — как на бирже"
+
+
+def test_orders_still_go_out_on_a_negative_account():
+    """Если бы проверка обеспечения осталась, на минусовом счёте заявки
+    перестали бы выставляться и торговля встала бы — то есть режим не работал бы."""
+    e = PaperEngine("T", 100.0, GridParams(), CostModel.from_settings(S), None)
+    e._last_price = 100.0
+    e.warm(_candles())
+    e.unlimited_loss = True
+    e.cash = -500.0
+    e.active = True
+    assert e._add_grid_order("buy", 99.0, 0.1, 1) is True
+    assert e.orders, "заявка не выставлена на минусовом счёте"
+
+
+def test_wipeout_is_counted_and_the_burn_accumulates():
+    """Каждый вынос считается, и сгоревшее суммируется — за ночь набегает
+    та самая цифра, которой не видно в остатке счёта."""
+    e = PaperEngine("T", 1000.0, GridParams(), CostModel.from_settings(S), None)
+    e._last_price = 100.0
+    e.warm(_candles())
+    e.unlimited_loss = True
+    _drown(e, qty=100.0, entry=100.0, mark=60.0)
+    first = e.liq_burned
+    assert e.liq_count == 1 and first > 0
+
+    e._last_price = 100.0
+    _drown(e, qty=100.0, entry=100.0, mark=55.0)
+    assert e.liq_count == 2
+    assert e.liq_burned > first, "сгоревшее обязано накапливаться, а не заменяться"
+
+
+def test_live_session_defaults_to_no_floor():
+    """Живая бумажная сессия по умолчанию без дна, бэктест — с дном."""
+    assert LiveSession(S, GridParams(), "15").unlimited_loss is True
+    assert PaperEngine("T", 100.0, GridParams(),
+                       CostModel.from_settings(S), None).unlimited_loss is False
+
+
+def test_no_floor_setting_survives_restart():
+    import tempfile
+    from pathlib import Path
+    sess = _session(unlimited=True)
+    sess.session_path = Path(tempfile.mkdtemp()) / "s.json"
+    sess.start_strategy("AAAUSDT")
+    sess._persist()
+
+    fresh = _session(unlimited=False)
+    fresh.session_path = sess.session_path
+    fresh._restore()
+    assert fresh.unlimited_loss is True
+    assert all(e.unlimited_loss for e in fresh.engines.values()),         "флаг обязан доехать до самих движков, иначе он ни на что не влияет"

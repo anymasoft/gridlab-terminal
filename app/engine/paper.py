@@ -116,6 +116,14 @@ class PaperEngine:
         # ликвидации, и после пяти подряд, а это очень разные ночи.
         self.liq_count = 0
         self.liq_burned = 0.0
+        # Бумажный счёт БЕЗ ДНА. На бирже при изолированной марже потерять больше
+        # внесённого нельзя — минус забирает страховой фонд. Здесь это ограничение
+        # снимается сознательно: счёт личный и тестовый, и его задача — показать
+        # ПОЛНЫЙ накопленный результат, включая то, что на бирже пришлось бы
+        # покрывать доливками. Касса уходит в минус, торговля продолжается.
+        # По умолчанию выключено: бэктест и опубликованные результаты обязаны
+        # оставаться такими, какими их дал бы реальный счёт.
+        self.unlimited_loss = False
         self.active = False       # стратегия запущена явно? до этого — только ручные ордера
         self._uid = 0
         self._last_price = 0.0
@@ -274,11 +282,21 @@ class PaperEngine:
             self.liquidated = True
             self.active = False                               # ← котирование прекращается навсегда
             self.liq_count += 1
+            if self.unlimited_loss:
+                # Позиция закрыта — это происходит и на бирже. Но убыток остаётся
+                # на счёте целиком, а инструмент продолжает торговать.
+                self.liq_burned += max(0.0, self.alloc - self.cash)
+                self.liquidated = False
+                self.active = True
+                self.events.append(StepEvent(ts, "Вынос по марже", fp, qty,
+                                             self.fills[-1].fee, r,
+                                             "позиция закрыта, убыток на счёте, торговля продолжается"))
+                return True
             # Сгорело = всё, что было в сетке на момент выноса. Отрицательная касса
             # (убыток глубже обеспечения) считается тоже: её забирает страховой фонд
             # биржи, но со счёта эти деньги ушли.
             self.liq_burned += max(0.0, self.alloc - self.cash) if self.cash < self.alloc                 else 0.0
-            if self.cash < 0.0:
+            if self.cash < 0.0 and not self.unlimited_loss:
                 self.cash = 0.0                               # изолированная маржа: минус не переносится
             self.events.append(StepEvent(ts, "Ликвидация ⚠", fp, qty,
                                          self.fills[-1].fee, r,
@@ -413,6 +431,12 @@ class PaperEngine:
         lev = self.leverage()
         mark = price if price > 0 else self._last_price
         equity = self.cash + self.unrealized_money(mark)
+        if self.unlimited_loss:
+            # Счёт без дна: обеспечение не проверяем, иначе на минусовом счёте
+            # заявки перестали бы выставляться и торговля встала бы — ровно то,
+            # чего этот режим и не должен допускать. Размер заявки при этом
+            # по-прежнему ограничен _max_contracts (аллокация × плечо).
+            return True
         if equity <= 0:
             return False
         add = qty * price * self.mult

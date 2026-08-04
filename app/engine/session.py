@@ -91,6 +91,10 @@ class LiveSession:
         # сессия поднимает его обратно; убирает его только кнопка «Стоп».
         self.wanted: set[str] = set()
         self.never_stop = True
+        # Личный тестовый счёт: убыток не упирается в размер депозита. На бирже
+        # глубже внесённого потерять нельзя, здесь — можно, чтобы утром была
+        # видна ПОЛНАЯ накопленная цифра, а не упёршийся в ноль остаток.
+        self.unlimited_loss = True
         self.ob_state = {"sym": None, "data": None}
         self.ob_feed: OrderBookFeed | None = None   # живой L2-стакан по WS (блок B)
         self.archiver: ArchiveWriter | None = None  # фоновый архив L2+сделок (блок E)
@@ -139,6 +143,7 @@ class LiveSession:
             e = PaperEngine(sym, 0.0, self.params, self.cost, self.fmap.get(sym),
                             spec=self.specs.get(sym))
             e.warm(cmap[sym])
+            e.unlimited_loss = self.unlimited_loss
             e.tf = self.interval
             e.last_funding_ts = cmap[sym][-1].ts
             self.engines[sym] = e
@@ -249,6 +254,9 @@ class LiveSession:
             # состояние старого формата: считаем желанными все, кто был активен
             self.wanted = {s for s, e in self.engines.items() if e.active}
         self.never_stop = bool(data.get("never_stop", True))
+        self.unlimited_loss = bool(data.get("unlimited_loss", True))
+        for e in self.engines.values():
+            e.unlimited_loss = self.unlimited_loss
         if "free_cash" in data:
             self.free_cash = float(data["free_cash"])
         else:
@@ -272,6 +280,7 @@ class LiveSession:
                 "free_cash": self.free_cash,
                 "sym_params": {s: p.model_dump() for s, p in self.sym_params.items()},
             "wanted": sorted(self.wanted), "never_stop": self.never_stop,
+            "unlimited_loss": self.unlimited_loss,
                 "engines": {sym: e.to_state() for sym, e in self.engines.items()},
                 "port_curve": self.port_curve, "bal_curve": self.bal_curve}   # хранить всю сессию (≤ _CURVE_CAP)
         try:
@@ -625,7 +634,7 @@ class LiveSession:
             # у работающих сеток забирается НЕЗАНЯТОЕ (обеспечение под открытыми
             # позициями не трогается), остаток добирается из свободных.
             added = 0.0
-            if e.cash <= 1e-9:
+            if e.cash <= 1e-9 and not self.unlimited_loss:
                 e.alloc = 0.0                  # прежняя доля сгорела вместе с позицией
                 running = sum(1 for x in self.engines.values() if x.active)
                 target = self.account_money() / max(1, running + 1)
@@ -634,7 +643,7 @@ class LiveSession:
                 e.alloc += added
                 e.cash += added
                 self.free_cash -= added
-            if e.cash <= 1e-9:
+            if e.cash <= 1e-9 and not self.unlimited_loss:
                 # Денег не осталось нигде: счёт исчерпан. Это тоже результат,
                 # и он должен быть виден, а не выглядеть как «ничего не произошло».
                 if not any(x.action == "Торговать нечем" for x in e.events[-3:]):
