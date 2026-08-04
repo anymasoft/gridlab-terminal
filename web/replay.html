@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GRIDLAB · Replay — фьючерсы MOEX</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;background:#f4f6f3;color:#14181a;
+    font-family:'Space Grotesk',sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden;}
+  ::-webkit-scrollbar{width:7px;height:7px;}
+  ::-webkit-scrollbar-thumb{background:#d3d8cf;border-radius:6px;}
+  ::-webkit-scrollbar-track{background:transparent;}
+  input[type=number]::-webkit-inner-spin-button{opacity:1;}
+  select{appearance:none;-webkit-appearance:none;}
+  .mono{font-family:'JetBrains Mono',monospace;}
+  button{font-family:inherit;}
+  .hov:hover{background:#f4f6f3 !important;}
+  .hovrow:hover{background:#eef2ec !important;}
+  .lnk{cursor:pointer;}
+  .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+    background:#ffffff;color:#14181a;border:1px solid #e3e6e0;
+    box-shadow:0 8px 24px rgba(20,24,26,.12);font-size:12px;padding:8px 14px;border-radius:8px;
+    z-index:120;opacity:0;transition:opacity .2s;pointer-events:none;}
+  .toast.on{opacity:1;}
+  .qq{margin-left:6px;width:14px;height:14px;border-radius:50%;border:1px solid #cdd3cb;
+    color:#939a93;font-size:9px;font-weight:700;display:inline-flex;align-items:center;
+    justify-content:center;cursor:help;flex:0 0 auto;}
+  .qq:hover{border-color:#1F8A5B;color:#1F8A5B;}
+  #tipEl{position:fixed;display:none;max-width:230px;background:#ffffff;color:#3a403c;
+    border:1px solid #e3e6e0;box-shadow:0 8px 26px rgba(20,24,26,.14);border-radius:9px;
+    padding:9px 11px;font-size:11px;line-height:1.45;z-index:999;pointer-events:none;
+    font-family:'Space Grotesk',sans-serif;}
+  input[type=range]{accent-color:#1F8A5B;cursor:pointer;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="toast" class="toast"></div>
+<div id="tipEl"></div>
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+<script src="/replay.js"></script>
+</body>
+</html>

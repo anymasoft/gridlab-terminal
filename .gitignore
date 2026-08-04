@@ -1,0 +1,37 @@
+# Секреты и локальная конфигурация
+.env
+.env.local
+*.local
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Данные рантайма: база прогонов, архивы стакана, сессии
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Логи
+*.log
+
+# IDE
+.idea/
+.vscode/
+
+# ОС
+.DS_Store
+Thumbs.db
+
+# Локальная конфигурация Claude Code (абсолютные пути машины)
+.claude/

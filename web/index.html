@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GRIDLAB · Adaptive Grid Research Terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;background:#f4f6f3;color:#14181a;
+    font-family:'Space Grotesk',sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden;}
+  ::-webkit-scrollbar{width:7px;height:7px;}
+  ::-webkit-scrollbar-thumb{background:#d3d8cf;border-radius:6px;}
+  ::-webkit-scrollbar-track{background:transparent;}
+  input[type=number]::-webkit-inner-spin-button{opacity:1;}
+  select{appearance:none;-webkit-appearance:none;}
+  .mono{font-family:'JetBrains Mono',monospace;}
+  button{font-family:inherit;}
+  .hov:hover{background:#f4f6f3 !important;}
+  .hovrow:hover{background:#eef2ec !important;}
+  .lnk{cursor:pointer;}
+  /* светлый toast (без тёмного фона) */
+  .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+    background:#ffffff;color:#14181a;border:1px solid #e3e6e0;
+    box-shadow:0 8px 24px rgba(20,24,26,.12);font-size:12px;padding:8px 14px;border-radius:8px;
+    z-index:120;opacity:0;transition:opacity .2s;pointer-events:none;}
+  .toast.on{opacity:1;}
+  /* инфо-иконка настроек */
+  .qq{margin-left:6px;width:14px;height:14px;border-radius:50%;border:1px solid #cdd3cb;
+    color:#939a93;font-size:9px;font-weight:700;display:inline-flex;align-items:center;
+    justify-content:center;cursor:help;flex:0 0 auto;}
+  .qq:hover{border-color:#1F8A5B;color:#1F8A5B;}
+  /* светлый shadcn-like тултип */
+  #tipEl{position:fixed;display:none;max-width:230px;background:#ffffff;color:#3a403c;
+    border:1px solid #e3e6e0;box-shadow:0 8px 26px rgba(20,24,26,.14);border-radius:9px;
+    padding:9px 11px;font-size:11px;line-height:1.45;z-index:999;pointer-events:none;
+    font-family:'Space Grotesk',sans-serif;}
+  /* подсветка перетаскиваемого уровня */
+  #priceCv{cursor:default;}
+  #priceCv.grab{cursor:grab;}
+  #priceCv.grabbing{cursor:grabbing;}
+  #priceCv.cross{cursor:crosshair;}
+  /* направляющая «поставить лимитку» (как на Bybit) */
+  #obGuide{position:absolute;left:0;right:0;height:0;border-top:1px dashed #9aa29a;
+    z-index:5;pointer-events:none;display:none;}
+  #obGuide .plus{position:absolute;right:74px;top:-11px;width:22px;height:22px;border-radius:5px;
+    background:#fff;border:1px solid #cdd3cb;color:#5b635e;font-size:14px;line-height:20px;
+    text-align:center;cursor:pointer;pointer-events:auto;box-shadow:0 2px 6px rgba(0,0,0,.08);}
+  #obGuide .plus:hover{border-color:#1F8A5B;color:#1F8A5B;}
+  #obGuide .ptag{position:absolute;right:2px;top:-9px;background:#14181a;color:#fff;
+    font:600 10px 'JetBrains Mono',monospace;padding:2px 5px;border-radius:3px;}
+  /* тикет ручного ордера */
+  #obTicket{position:absolute;z-index:9;display:none;width:188px;background:#fff;
+    border:1px solid #e3e6e0;border-radius:9px;box-shadow:0 10px 30px rgba(20,24,26,.16);
+    padding:9px;font-family:'Space Grotesk',sans-serif;}
+
+  /* ───────── блок стакана (order flow): дизайн стакана на живых данных ─────────
+     scope под #obFlow, чтобы классы (.row/.side/.trade…) не пересекались с терминалом.
+     Палитра терминала (зелёный/красный) + фиолетовый --mine для своей заявки. */
+  #obFlow{
+    --ask:#C4453A; --ask-bar:rgba(196,69,58,0.10); --ask-bar-2:rgba(196,69,58,0.22); --ask-wash:rgba(196,69,58,0.05);
+    --bid:#1F8A5B; --bid-bar:rgba(31,138,91,0.10); --bid-bar-2:rgba(31,138,91,0.22); --bid-wash:rgba(31,138,91,0.05);
+    --mine:#5654D6; --mine-wash:rgba(86,84,214,0.08);
+    --t1:#14181a; --t2:#5b635e; --t3:#939a93; --hair:#eef0ec; --border:#e3e6e0; --panel-3:#f7f8fa;
+    --rh:21px; --mono:'JetBrains Mono',monospace;
+    display:flex;flex-direction:column;min-height:0;overflow:hidden;color:var(--t1);
+  }
+  #obFlow .num{font-family:var(--mono);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;}
+  #obFlow .ob-stats{display:flex;flex-direction:column;gap:6px;padding:8px 12px 9px;border-bottom:1px solid var(--hair);flex:none;}
+  #obFlow .imb{display:flex;align-items:center;gap:9px;}
+  #obFlow .imb .lab{font-size:10px;font-weight:600;color:var(--t3);width:62px;}
+  #obFlow .imb .bar{flex:1;height:6px;border-radius:4px;overflow:hidden;display:flex;background:var(--ask-bar-2);}
+  #obFlow .imb .bar .g{background:var(--bid);transition:width .5s cubic-bezier(.22,.61,.36,1);}
+  #obFlow .imb .bar .r{background:var(--ask);transition:width .5s cubic-bezier(.22,.61,.36,1);}
+  #obFlow .imb .pct{font-size:11px;font-weight:600;width:36px;text-align:right;}
+  #obFlow .depthrow{display:flex;justify-content:space-between;font-size:10px;color:var(--t3);}
+  #obFlow .depthrow b{font-weight:600;color:var(--t2);}
+  #obFlow .colhead{display:grid;grid-template-columns:1fr 1fr 1fr;padding:6px 12px 5px;flex:none;border-bottom:1px solid var(--hair);}
+  #obFlow .colhead div{font-size:9px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--t3);}
+  #obFlow .colhead .r{text-align:right;}
+  #obFlow .ladder{flex:1 1 0;display:flex;flex-direction:column;min-height:0;position:relative;}
+  #obFlow .side{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;position:relative;}
+  #obFlow .side.asks{justify-content:flex-end;}
+  #obFlow .side.bids{justify-content:flex-start;}
+  #obFlow .row{position:relative;flex:none;height:var(--rh);display:grid;grid-template-columns:1fr 1fr 1fr;align-items:center;padding:0 12px;font-family:var(--mono);font-size:11.5px;cursor:pointer;isolation:isolate;}
+  #obFlow .row.empty{display:none;}
+  #obFlow .row .depthbar{position:absolute;top:1px;bottom:1px;right:0;z-index:-1;border-radius:3px 0 0 3px;transition:width .42s cubic-bezier(.22,.61,.36,1),background-color .3s;}
+  #obFlow .row .px{font-weight:600;}
+  #obFlow .row .sz{text-align:right;color:var(--t1);font-weight:500;}
+  #obFlow .row .cum{text-align:right;color:var(--t3);font-weight:400;font-size:10.5px;}
+  #obFlow .row.ask .px{color:var(--ask);} #obFlow .row.ask .depthbar{background:var(--ask-bar);}
+  #obFlow .row.bid .px{color:var(--bid);} #obFlow .row.bid .depthbar{background:var(--bid-bar);}
+  #obFlow .row.ask.wall{color:var(--ask);} #obFlow .row.bid.wall{color:var(--bid);}
+  #obFlow .row.wall .depthbar{box-shadow:inset 2px 0 0 currentColor;}
+  #obFlow .row.wall .sz{font-weight:700;color:inherit;}
+  #obFlow .row .wall-tag{display:none;}
+  #obFlow .row.wall .wall-tag{display:block;position:absolute;left:5px;top:50%;transform:translateY(-50%);width:3px;height:12px;border-radius:2px;background:currentColor;opacity:.85;}
+  #obFlow .row.flash-ask{animation:obFlAsk .55s ease-out;}
+  #obFlow .row.flash-bid{animation:obFlBid .55s ease-out;}
+  @keyframes obFlAsk{0%{background:var(--ask-bar-2);}100%{background:transparent;}}
+  @keyframes obFlBid{0%{background:var(--bid-bar-2);}100%{background:transparent;}}
+  #obFlow .row.mine{background:var(--mine-wash);}
+  #obFlow .row.mine .px{color:var(--mine);}
+  #obFlow .row.mine .sz{color:var(--mine);font-weight:700;}
+  #obFlow .my-marker{position:absolute;left:0;right:0;height:var(--rh);pointer-events:none;z-index:2;opacity:0;transition:top .5s cubic-bezier(.4,0,.2,1),opacity .3s;}
+  #obFlow .my-marker .edge{position:absolute;left:0;top:3px;bottom:3px;width:3px;border-radius:0 2px 2px 0;background:var(--mine);}
+  #obFlow .my-marker .badge{position:absolute;right:6px;top:50%;transform:translateY(-50%);font-family:'Space Grotesk',sans-serif;font-size:8px;font-weight:700;letter-spacing:.06em;color:#fff;background:var(--mine);border-radius:4px;padding:2px 5px;line-height:1;box-shadow:0 1px 4px rgba(86,84,214,.4);}
+  #obFlow .spread{flex:none;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:8px;padding:8px 12px;margin:3px 0;background:linear-gradient(180deg,var(--ask-wash),var(--bid-wash));border-top:1px solid var(--hair);border-bottom:1px solid var(--hair);}
+  #obFlow .spread .mid{font-family:var(--mono);font-size:18px;font-weight:700;text-align:center;display:flex;align-items:center;gap:6px;justify-content:center;transition:color .25s;}
+  #obFlow .spread .mid .arrow{font-size:12px;line-height:1;}
+  #obFlow .spread .sp-l,#obFlow .spread .sp-r{display:flex;flex-direction:column;gap:1px;}
+  #obFlow .spread .sp-r{align-items:flex-end;}
+  #obFlow .spread .k{font-size:8.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--t3);font-weight:600;}
+  #obFlow .spread .v{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--t2);}
+  #obFlow .myorder{flex:none;border-top:1px solid var(--border);background:#fbfcfa;padding:9px 12px 10px;}
+  #obFlow .myorder.off{display:none;}
+  #obFlow .mo-head{display:flex;align-items:center;gap:7px;margin-bottom:8px;}
+  #obFlow .mo-head .dot{width:8px;height:8px;border-radius:2px;background:var(--mine);}
+  #obFlow .mo-head .ttl{font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--mine);}
+  #obFlow .mo-head .oside{font-size:8.5px;font-weight:700;letter-spacing:.05em;border-radius:4px;padding:2px 6px;}
+  #obFlow .mo-head .oside.buy{color:var(--bid);background:var(--bid-bar);}
+  #obFlow .mo-head .oside.sell{color:var(--ask);background:var(--ask-bar);}
+  #obFlow .mo-head .status{margin-left:auto;font-size:9.5px;font-weight:600;color:var(--t2);display:flex;align-items:center;gap:5px;}
+  #obFlow .mo-head .status .s-dot{width:6px;height:6px;border-radius:50%;background:var(--mine);animation:obPulse 1.6s infinite;}
+  @keyframes obPulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+  #obFlow .mo-px{display:flex;align-items:baseline;gap:9px;margin-bottom:8px;}
+  #obFlow .mo-px .big{font-family:var(--mono);font-size:16px;font-weight:700;color:var(--mine);}
+  #obFlow .mo-px .sz{font-family:var(--mono);font-size:11px;color:var(--t2);}
+  #obFlow .mo-px .sz b{color:var(--t1);font-weight:600;}
+  #obFlow .mo-px .ticks{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--t3);}
+  #obFlow .queue-labs{display:flex;justify-content:space-between;margin-bottom:5px;font-size:9.5px;}
+  #obFlow .queue-labs .ql{color:var(--t3);font-weight:500;}
+  #obFlow .queue-labs .ql .num{color:var(--t2);font-weight:600;}
+  #obFlow .queue-labs .ql.me{color:var(--mine);font-weight:600;}
+  #obFlow .qbar{height:11px;border-radius:6px;overflow:hidden;display:flex;background:var(--panel-3);border:1px solid var(--border);}
+  #obFlow .qbar .ahead{background-image:repeating-linear-gradient(115deg,#C8CDD7 0 5px,#D6DAE2 5px 10px);transition:width .5s cubic-bezier(.22,.61,.36,1);}
+  #obFlow .qbar .me{background:var(--mine);transition:width .5s cubic-bezier(.22,.61,.36,1);}
+  #obFlow .qbar .behind{background:#E7E9EE;transition:width .5s cubic-bezier(.22,.61,.36,1);}
+  #obFlow .qprog{display:flex;align-items:center;gap:6px;margin-top:7px;font-size:9.5px;color:var(--t3);}
+  #obFlow .qprog .est{display:inline-flex;align-items:center;gap:3px;font-style:italic;}
+  #obFlow .qprog .pval{margin-left:auto;font-family:var(--mono);font-weight:600;color:var(--mine);}
+  /* ───────── лента сделок (T&S): отдельная колонка СПРАВА от стакана ─────────
+     те же scoped-токены, что у #obFlow, чтобы классы .trade/.tape* не текли в терминал.
+     Палитра терминала (зелёный/красный) + фиолетовый --mine. */
+  #obTapePanel{
+    --ask:#C4453A; --ask-bar-2:rgba(196,69,58,0.22); --ask-wash:rgba(196,69,58,0.05);
+    --bid:#1F8A5B; --bid-wash:rgba(31,138,91,0.05); --mine:#5654D6;
+    --t1:#14181a; --t2:#5b635e; --t3:#939a93; --hair:#eef0ec; --border:#e3e6e0; --panel-3:#f7f8fa;
+    --mono:'JetBrains Mono',monospace;
+    display:flex;flex-direction:column;min-height:0;overflow:hidden;color:var(--t1);
+  }
+  #obTapePanel .num{font-family:var(--mono);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;}
+  #obTapePanel .tapehead{display:grid;grid-template-columns:auto 1fr auto;gap:8px;padding:6px 12px 5px;border-bottom:1px solid var(--hair);flex:none;}
+  #obTapePanel .tapehead div{font-size:9px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--t3);}
+  #obTapePanel .tapehead .r{text-align:right;}
+  #obTapePanel .tape-list{flex:1 1 0;overflow:hidden;position:relative;min-height:54px;}
+  #obTapePanel .tape-col{position:absolute;inset:0;display:flex;flex-direction:column;overflow:hidden;}
+  #obTapePanel .tape-wait{position:absolute;inset:0;align-items:center;justify-content:center;text-align:center;color:var(--t3);font-size:11px;padding:0 18px;background:#fff;}
+  #obTapePanel .trade{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;padding:0 12px;height:20px;font-family:var(--mono);font-size:11px;position:relative;flex:none;}
+  #obTapePanel .trade .tt{color:var(--t3);font-size:10px;}
+  #obTapePanel .trade .pp{font-weight:600;}
+  #obTapePanel .trade .ss{text-align:right;color:var(--t1);font-weight:500;}
+  #obTapePanel .trade.buy .pp{color:var(--bid);} #obTapePanel .trade.sell .pp{color:var(--ask);}
+  #obTapePanel .trade.big{font-weight:700;} #obTapePanel .trade.big .ss{font-weight:700;}
+  #obTapePanel .trade.big::before{content:"";position:absolute;left:0;top:3px;bottom:3px;width:3px;border-radius:0 2px 2px 0;}
+  #obTapePanel .trade.buy.big::before{background:var(--bid);} #obTapePanel .trade.sell.big::before{background:var(--ask);}
+  #obTapePanel .trade.big.buy{background:var(--bid-wash);} #obTapePanel .trade.big.sell{background:var(--ask-wash);}
+  #obTapePanel .trade.enter{animation:obtIn .45s ease-out;}
+  @keyframes obtIn{0%{transform:translateY(-100%);opacity:0;}100%{transform:translateY(0);opacity:1;}}
+  #obTapePanel .tape-foot{flex:none;border-top:1px solid var(--hair);padding:7px 12px;display:flex;flex-direction:column;gap:6px;}
+  #obTapePanel .tf-row{display:flex;justify-content:space-between;align-items:center;font-size:9.5px;color:var(--t3);}
+  #obTapePanel .tf-row .v{font-family:var(--mono);font-weight:600;}
+  #obTapePanel .tf-bar{height:6px;border-radius:4px;overflow:hidden;display:flex;background:var(--ask-bar-2);}
+  #obTapePanel .tf-bar .g{background:var(--bid);transition:width .6s ease;} #obTapePanel .tf-bar .r{background:var(--ask);transition:width .6s ease;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="toast" class="toast"></div>
+<div id="tipEl"></div>
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
