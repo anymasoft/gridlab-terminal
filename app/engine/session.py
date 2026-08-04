@@ -374,6 +374,13 @@ class LiveSession:
         e = self.engines.get(sym)
         if e is None:
             return
+        # Плечо обрезаем пределом БИРЖИ по этому инструменту. Позволить на бумаге
+        # 100× там, где Bybit даёт 50×, значит занизить показанный риск вдвое.
+        if e.max_leverage > 0 and gp.leverage > e.max_leverage:
+            gp = gp.model_copy(update={"leverage": e.max_leverage})
+            e.events.append(StepEvent(
+                0, "Плечо ограничено", e._last_price, 0, 0, 0,
+                f"биржа даёт по {sym} не больше {e.max_leverage:g}×"))
         self.sym_params[sym] = gp
         self.params = gp            # шаблон для пар, которым параметры ещё не задавали
         e.p = gp
@@ -716,7 +723,9 @@ class LiveSession:
             "any_started": self.state["started"],
             "free_cash": round(self.free_cash, 2),
             # Параметры ВЫБРАННОЙ сетки: панель «Параметры» правит её, а не сессию.
-            "params": se.p.model_dump(),
+            # Плечо отдаём ДЕЙСТВУЮЩЕЕ: в самом параметре 0 означает «как в конфиге»,
+            # и показывать человеку ноль вместо реальной тройки нельзя.
+            "params": {**se.p.model_dump(), "leverage": round(se.leverage(), 2)},
             "capital": round(self.capital, 2),
             "price": se._last_price,
             "dash": {"balance": round(balance, 2), "equity": round(total_eq, 2),
@@ -734,6 +743,12 @@ class LiveSession:
                      "pos_avg": round(se.pos.avg_entry, 6),
                      "last_net": (round(se.roundtrips[-1]["net"], 4)
                                   if se.roundtrips else None),
+                     # Плечо, обеспечение и цена ликвидации ВЫБРАННОЙ пары — то,
+                     # что на бирже видно рядом с позицией.
+                     "leverage": round(se.leverage(), 2),
+                     "max_leverage": se.max_leverage,
+                     "margin_used": round(se.locked_capital(), 2),
+                     "liq_price": round(se.liquidation_price(), 6),
                      "funding": round(total_fund, 2)},
             "instruments": instruments,
             "roundtrips": [

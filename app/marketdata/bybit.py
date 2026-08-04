@@ -76,7 +76,11 @@ async def fetch_funding(symbol: str, limit: int = 200,
 
 async def fetch_instrument_meta(symbol: str,
                                 settings: Settings | None = None) -> dict:
-    """tickSize/qtyStep/minOrderQty для аккуратного округления (как на бирже)."""
+    """tickSize/qtyStep/minOrderQty для округления и предельное плечо инструмента.
+
+    Плечо у Bybit своё на каждый инструмент: по BTC доходят до 100x, по мелким
+    альтам предел заметно ниже. Брать его из конфига одним числом на всю корзину
+    значит разрешить на бумаге то, чего биржа бы не дала."""
     s = settings or get_settings()
     url = f"{s.active_base_url}/v5/market/instruments-info"
     params = {"category": s.bybit_category, "symbol": symbol}
@@ -90,10 +94,12 @@ async def fetch_instrument_meta(symbol: str,
             "tick_size": float(item["priceFilter"]["tickSize"]),
             "qty_step": float(item["lotSizeFilter"]["qtyStep"]),
             "min_qty": float(item["lotSizeFilter"]["minOrderQty"]),
+            "max_leverage": float(item.get("leverageFilter", {})
+                                  .get("maxLeverage") or 0.0),
         }
     except Exception as e:  # noqa: BLE001
         log.info("meta fetch failed %s: %s", symbol, e)
-        return {"tick_size": 0.0, "qty_step": 0.0, "min_qty": 0.0}
+        return {"tick_size": 0.0, "qty_step": 0.0, "min_qty": 0.0, "max_leverage": 0.0}
 
 
 async def fetch_many_meta(symbols: list[str],

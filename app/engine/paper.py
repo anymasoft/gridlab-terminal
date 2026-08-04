@@ -67,6 +67,9 @@ class PaperEngine:
         self.tick_size = float(spec.get("tick_size") or 0.0)
         self.qty_step = float(spec.get("qty_step") or 0.0)
         self.min_qty = float(spec.get("min_qty") or 0.0)
+        # Предельное плечо ИНСТРУМЕНТА (Bybit: BTC 100x, BNB 50x, DOGE 75x).
+        # 0 = биржа не ответила, тогда ограничиваем только конфигом.
+        self.max_leverage = float(spec.get("max_leverage") or 0.0)
         # Mark price биржи. Ликвидация у Bybit считается ОТ НЕЁ, а не от последней сделки:
         # last может дёрнуться на тонком стакане, mark сглажен по индексу.
         self.mark_price = 0.0
@@ -337,6 +340,34 @@ class PaperEngine:
                                  for o in self.orders if o.side == "sell")
         return max(abs(pos_notional + buys), abs(pos_notional - sells))
 
+    def leverage(self) -> float:
+        """Плечо этой сетки: что задал человек, обрезанное пределом биржи.
+
+        Работает как гарантийное обеспечение на срочном рынке: под позицию
+        замораживается не весь её размер, а доля 1/leverage. Само по себе плечо
+        заявку НЕ увеличивает — оно поднимает потолок, до которого сетке разрешено
+        набирать позицию (см. grid_notional_mult)."""
+        lev = self.p.leverage if self.p.leverage > 0 else self.cost.leverage
+        lev = max(1.0, lev)
+        if self.max_leverage > 0:
+            lev = min(lev, self.max_leverage)
+        return lev
+
+    def liquidation_price(self) -> float:
+        """Цена, при которой обеспечения перестанет хватать и позицию закроют.
+
+        Выводится из того же условия, по которому срабатывает _check_liquidation:
+        эквити = нотионал × поддерживающая маржа. 0 — позиции нет."""
+        q = self.pos.qty
+        if abs(q) < 1e-12:
+            return 0.0
+        mmr = self.cost.maint_margin
+        denom = q * ((1.0 - mmr) if q > 0 else (1.0 + mmr))
+        if abs(denom) < 1e-12:
+            return 0.0
+        px = (q * self.pos.avg_entry - self.cash / self.mult) / denom
+        return px if px > 0 else 0.0
+
     def locked_capital(self) -> float:
         """Сколько денег инструмента нельзя забрать обратно в свободные.
 
@@ -354,12 +385,11 @@ class PaperEngine:
         Биржа резервирует обеспечение не только под позицию, но и под лимитки,
         способные её нарастить. Без этого учёта бумажный счёт выставляет заявки,
         которые реальный счёт бы не потянул."""
-        lev = self.cost.leverage if self.cost.leverage > 0 else 1.0
-        return self._worst_notional(price) / lev
+        return self._worst_notional(price) / self.leverage()
 
     def _margin_allows(self, side: str, qty: float, price: float) -> bool:
         """Хватает ли свободного обеспечения, чтобы выставить ещё одну заявку."""
-        lev = self.cost.leverage if self.cost.leverage > 0 else 1.0
+        lev = self.leverage()
         mark = price if price > 0 else self._last_price
         equity = self.cash + self.unrealized_money(mark)
         if equity <= 0:
@@ -380,6 +410,10 @@ class PaperEngine:
         if self.p.contract_qty > 0:
             return self.p.contract_qty          # фьючерс: размер в контрактах
         n = max(1, self.p.grid_levels)
+        # Плеча здесь намеренно НЕТ. На бирже оно не задаёт размер заявки — только
+        # долю, замораживаемую под обеспечение. Размером управляет grid_notional_mult:
+        # при mult=1 сетка торгует нотионалом в размер аллокации (фактически 1×),
+        # при mult=3 и плече 3× — на все доступные деньги. Потолок ставит _max_contracts.
         usd = self.alloc * self.p.grid_notional_mult / n
         return usd / price if price > 0 else 0.0
 
@@ -838,8 +872,8 @@ class PaperEngine:
         elif self.p.max_orders > 0:
             caps.append(self.p.max_orders * self.p.contract_qty if self.p.contract_qty > 0
                         else self.p.max_orders * (self.p.order_usd / price))
-        if self.cost.leverage > 0 and self.alloc > 0:
-            caps.append(self.alloc * self.cost.leverage / price)
+        if self.alloc > 0:
+            caps.append(self.alloc * self.leverage() / price)
         return min(caps) if caps else 0.0
 
     def _allowed_qty(self, side: str, qty: float, price: float) -> float:

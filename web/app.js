@@ -29,6 +29,7 @@ S.book = { asks:new Map(), bids:new Map(), my:{aheadDisp:0}, imbDisp:0.5,
 
 // подсказки к параметрам (shadcn-like тултипы)
 const TIPS = {
+  leverage:'Плечо ЭТОЙ пары — как на бирже, где оно выставляется на инструмент. Само по себе заявку не увеличивает: оно задаёт, какая доля позиции замораживается под обеспечение (1/плечо) и где встанет цена ликвидации. Чтобы сетка реально торговала крупнее, поднимайте «Нотионал (× капитала)» — плечо задаёт его потолок. Предел свой у каждого инструмента и приходит с Bybit: BTC 100x, BNB 50x, DOGE 75x. Больше плечо = ближе ликвидация.',
   mode:'Грид (по умолчанию): уровни стоят НЕПОДВИЖНО, купленный на уровне лот продаётся лимиткой на уровень выше — прибыль снимается с колебания цены. Эвристика и Avellaneda-Stoikov — маркет-мейкинг: котировки перецентрируются на текущую цену после каждого исполнения, что в тренде превращается в погоню за ценой.',
   grid_step_mode:'Чем задан шаг лестницы. «В % цены» (по умолчанию) и «в деньгах» НЕ зависят от таймфрейма графика: 1% — это 1% и на минутках, и на часах, поэтому переключение масштаба больше не перестраивает сетку. «От ATR» — прежнее поведение: шаг подстраивается под волатильность выбранного таймфрейма. Шаг в деньгах осмыслен только для одного инструмента: на корзине $100 несопоставимы между BTC и DOGE.',
   grid_step_pct:'Расстояние между уровнями в процентах от цены. Каждый round-trip приносит примерно этот процент минус две maker-комиссии. Слишком мелкий шаг = много сделок с малой прибылью, и доля комиссии растёт.',
@@ -509,6 +510,19 @@ function roundtripsHTML(){
   return `<div style="min-width:700px;">${hrow}${body}${foot}</div>`;
 }
 
+function leverageRow(){
+  // Предел берётся с биржи по конкретному инструменту, а не из общей константы:
+  // разрешать на бумаге то, чего Bybit бы не дал, — значит врать о рисках.
+  const lv=(S.live&&S.live.dash)||{};
+  const mx=lv.max_leverage>0?lv.max_leverage:100;
+  const sub=[];
+  if(lv.max_leverage>0) sub.push(`предел ${S.selInst}: ${mx}×`);
+  if(lv.margin_used>0)  sub.push(`занято $${lv.margin_used.toFixed(2)}`);
+  if(lv.liq_price>0)    sub.push(`ликвидация ${lv.liq_price}`);
+  return paramRow('Плечо (×)','leverage',1,1,mx)
+    + (sub.length?`<div class="mono" style="font-size:9.5px;color:#939a93;padding:0 0 8px;margin-top:-6px;">${sub.join(' · ')}</div>`:'');
+}
+
 function paramRow(label,key,step,min,max){
   return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid #eef0ec;">
     <span style="font-size:12px;color:#5b635e;display:flex;align-items:center;">${label}${qq(key)}</span>
@@ -613,6 +627,7 @@ function rightPanel(){
            : paramRow('Grid Spacing (ATR ×)','grid_spacing',0.1,0.1,10))
           + paramRow('Уровней лестницы','grid_levels',1,2,50)
           + paramRow('Нотионал (× капитала)','grid_notional_mult',0.1,0.1,10)
+          + leverageRow()
           + paramRow('Ре-анкор (0 = выкл)','grid_reanchor',0.25,0,5)
         : paramRow('Grid Spacing (ATR ×)','grid_spacing',0.1,0.1,10)
           + paramRow('Кол-во уровней','levels',1,2,30)
