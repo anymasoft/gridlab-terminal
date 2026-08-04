@@ -318,13 +318,15 @@ function instRowsHTML(){
       <div style="flex:1;min-width:0;">
         <div style="display:flex;align-items:center;gap:6px;">
           <span class="mono" style="font-size:12px;font-weight:600;">${inst.sym}</span>
-          <span style="width:5px;height:5px;border-radius:50%;background:${inst.status==='stop'?C.liq:C.accent};flex:0 0 auto;"></span>
+          <span style="width:5px;height:5px;border-radius:50%;background:${inst.status==='stop'?C.liq:inst.status==='blocked'?'#C98A1A':C.accent};flex:0 0 auto;"></span>
         </div>
         <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
           <span class="mono" style="font-size:11px;color:${pos?C.green:C.red};font-weight:500;">${pos?'+$':'-$'}${Math.abs(inst.pnl).toFixed(2)}</span>
           <span class="mono" style="font-size:10px;color:#939a93;">${inst.pnl_pct>=0?'+':''}${inst.pnl_pct.toFixed(1)}%</span>
         </div>
-        <div class="mono" style="font-size:9.5px;color:#aab0a9;margin-top:3px;">$${inst.alloc.toFixed(0)} · ${inst.orders} орд · ${inst.status==='stop'?'стоп':'активен'}</div>
+        ${inst.status==='blocked'
+          ? `<div class="mono" data-tip="Биржа не примет такую заявку: ${inst.blocked}. Минимальный ордер по этому инструменту — $${(inst.min_order_usd||0).toFixed(2)}, а сетка выставляет $${(inst.alloc/10).toFixed(2)}. Увеличьте капитал, уменьшите число уровней или исключите инструмент из корзины." style="font-size:9.5px;color:#C98A1A;margin-top:3px;">не торгуется · мин. ордер $${(inst.min_order_usd||0).toFixed(2)}</div>`
+          : `<div class="mono" style="font-size:9.5px;color:#aab0a9;margin-top:3px;">$${inst.alloc.toFixed(0)} · ${inst.orders} орд · ${inst.status==='stop'?'стоп':'активен'}</div>`}
       </div>
       <svg viewBox="0 0 56 18" style="width:52px;height:17px;flex:0 0 auto;"><path d="${sparkPath(inst.spark)}" fill="none" stroke="${sc}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
     </div>`;

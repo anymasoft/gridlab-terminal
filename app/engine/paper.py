@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import datetime
+import math
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -48,12 +49,26 @@ class StepEvent:
 
 class PaperEngine:
     def __init__(self, sym: str, alloc: float, params: GridParams, cost: CostModel,
-                 funding: dict[int, float] | None = None, mult: float = 1.0):
+                 funding: dict[int, float] | None = None, mult: float = 1.0,
+                 spec: dict | None = None):
         self.sym = sym
         self.alloc = alloc
         self.p = params
         self.cost = cost
         self.funding = funding or {}
+        # Биржевые ограничения инструмента: шаг цены, шаг лота, минимальный объём.
+        # Без них бумажный счёт выставляет заявки, которых биржа бы не приняла:
+        # цена не по тику, объём не по шагу лота, объём ниже минимального.
+        spec = spec or {}
+        self.tick_size = float(spec.get("tick_size") or 0.0)
+        self.qty_step = float(spec.get("qty_step") or 0.0)
+        self.min_qty = float(spec.get("min_qty") or 0.0)
+        # Mark price биржи. Ликвидация у Bybit считается ОТ НЕЁ, а не от последней сделки:
+        # last может дёрнуться на тонком стакане, mark сглажен по индексу.
+        self.mark_price = 0.0
+        self.rejected_min_qty = 0    # сколько заявок не выставлено: объём ниже минимума
+        self.rejected_margin = 0     # сколько заявок не выставлено: не хватило маржи
+        self.blocked_reason = ""     # почему инструмент не торгуется (пусто = торгуется)
         # mult — денежная стоимость 1 пункта цены за 1 контракт (₽). Крипто-режим: 1.0
         # (цена уже в деньгах). Фьючерс: point_value из спеки → PnL считается в рублях.
         self.mult = mult
@@ -186,6 +201,11 @@ class PaperEngine:
             return True                                       # счёт уничтожен — торговли больше нет
         if self.pos.qty == 0:
             return False
+        # Bybit считает ликвидацию по MARK PRICE (сглаженной по индексу), а не по цене
+        # последней сделки: last дёргается на тонком стакане и дал бы ложные срабатывания
+        # там, где реальная биржа позицию не тронула бы. В бэктесте mark недоступен —
+        # тогда честно используем цену бара.
+        mark = self.mark_price if self.mark_price > 0 else mark
         notional = abs(self.pos.qty) * mark * self.mult       # деньги (₽ для фьючерса)
         equity = self.cash + self.unrealized_money(mark)
         if equity <= notional * self.cost.maint_margin:
@@ -233,6 +253,73 @@ class PaperEngine:
         self.mm_posted += len(grid)              # для fill-rate (блок F)
         self._set_anchor(center)
 
+    # ───────── биржевые ограничения инструмента ─────────
+    def round_price(self, price: float, side: str) -> float:
+        """Цена к шагу тика. Округляем КОНСЕРВАТИВНО — buy вниз, sell вверх: заявка
+        не должна оказаться ближе к рынку, чем задумано, иначе бумажный счёт получит
+        исполнение по цене, до которой рынок в реальности не дошёл."""
+        if self.tick_size <= 0 or price <= 0:
+            return price
+        n = price / self.tick_size
+        k = math.floor(n + 1e-9) if side == "buy" else math.ceil(n - 1e-9)
+        return round(k * self.tick_size, 12)
+
+    def round_qty(self, qty: float) -> float:
+        """Объём вниз к шагу лота. Ниже минимального — биржа отклонит заявку,
+        возвращаем 0, и заявка не выставляется вовсе."""
+        if qty <= 0:
+            return 0.0
+        if self.qty_step > 0:
+            qty = math.floor(qty / self.qty_step + 1e-9) * self.qty_step
+            qty = round(qty, 12)
+        if self.min_qty > 0 and qty < self.min_qty - 1e-12:
+            return 0.0
+        return qty
+
+    # ───────── маржа под ВЫСТАВЛЕННЫЕ заявки ─────────
+    def _worst_notional(self, price: float, extra_buy: float = 0.0,
+                        extra_sell: float = 0.0) -> float:
+        """Худший нотионал позиции, если исполнятся все заявки одной стороны.
+
+        Два принципа, оба взяты у биржи:
+
+        1. Неттинг (one-way, режим Bybit по умолчанию): встречные заявки не могут
+           нарастить позицию одновременно, поэтому обеспечение резервируется
+           по БОЛЬШЕЙ стороне, а не по сумме обеих. Сетка на $100 капитала выставляет
+           $100 покупок и $100 продаж — суммарно $200 нотионала, но риск всё равно $100.
+        2. Нотионал заявки считается по ЕЁ СОБСТВЕННОЙ цене, а не по текущей рыночной:
+           заявка на покупку по 90 занимает обеспечение под 90, а не под 100.
+
+        extra_* — нотионал ещё не выставленной заявки, для проверки «влезет ли»."""
+        pos_notional = self.pos.qty * price * self.mult
+        buys = extra_buy + sum(o.size * o.price * self.mult
+                               for o in self.orders if o.side == "buy")
+        sells = extra_sell + sum(o.size * o.price * self.mult
+                                 for o in self.orders if o.side == "sell")
+        return max(abs(pos_notional + buys), abs(pos_notional - sells))
+
+    def _margin_used(self, price: float) -> float:
+        """Начальная маржа, занятая позицией и уже выставленными заявками.
+
+        Биржа резервирует обеспечение не только под позицию, но и под лимитки,
+        способные её нарастить. Без этого учёта бумажный счёт выставляет заявки,
+        которые реальный счёт бы не потянул."""
+        lev = self.cost.leverage if self.cost.leverage > 0 else 1.0
+        return self._worst_notional(price) / lev
+
+    def _margin_allows(self, side: str, qty: float, price: float) -> bool:
+        """Хватает ли свободного обеспечения, чтобы выставить ещё одну заявку."""
+        lev = self.cost.leverage if self.cost.leverage > 0 else 1.0
+        mark = price if price > 0 else self._last_price
+        equity = self.cash + self.unrealized_money(mark)
+        if equity <= 0:
+            return False
+        add = qty * price * self.mult
+        worst = self._worst_notional(mark,
+                                     extra_buy=add if side == "buy" else 0.0,
+                                     extra_sell=add if side == "sell" else 0.0)
+        return worst / lev <= equity + 1e-9
+
     # ───────── классический грид: лестница и парные заявки ─────────
     def _grid_size_of(self, price: float) -> float:
         """Размер одного ордера лестницы. Привязан к АЛЛОКАЦИИ инструмента:
@@ -254,12 +341,44 @@ class PaperEngine:
         quotes = self.ladder.install(center, step, self._grid_size_of)
         if not quotes:
             return
-        self.orders = manual + [
-            _OpenOrder(q.side, q.price, q.size, q.level,
-                       queue_ahead=self._queue_ahead(q.side, q.price))
-            for q in quotes]
-        self.mm_posted += len(quotes)
+        self.orders = manual
+        placed = 0
+        for q in quotes:
+            if self._add_grid_order(q.side, q.price, q.size, q.level):
+                placed += 1
+        self.mm_posted += placed
         self._set_anchor(center)
+        if placed == 0:
+            # Ни одна заявка не прошла биржевые ограничения — чаще всего объём ордера
+            # ниже минимального лота инструмента. Молча повторять попытку на каждом
+            # тике нельзя: движок уходит в холостой цикл, а пользователь видит пустую
+            # сетку без объяснения. Останавливаем инструмент и говорим почему.
+            self.active = False
+            self.blocked_reason = (
+                f"объём ордера ниже минимального лота ({self.min_qty})"
+                if self.rejected_min_qty else "не хватает обеспечения под заявки")
+            self.events.append(StepEvent(
+                ts, "Инструмент отключён", center, 0, 0, 0,
+                f"сетка не выставлена: {self.blocked_reason}. "
+                f"Увеличьте капитал, уменьшите число уровней или исключите инструмент."))
+
+    def _add_grid_order(self, side: str, price: float, size: float, level: int) -> bool:
+        """Выставить сеточную заявку с проверками, которые сделала бы биржа:
+        цена по тику, объём по шагу лота и не ниже минимального, обеспечение в наличии.
+        Возвращает False, если заявка не прошла — она просто не выставляется."""
+        px = self.round_price(price, side)
+        qty = self.round_qty(size)
+        if px <= 0:
+            return False
+        if qty <= 0:
+            self.rejected_min_qty += 1
+            return False
+        if not self._margin_allows(side, qty, px):
+            self.rejected_margin += 1
+            return False
+        self.orders.append(_OpenOrder(side, px, qty, level,
+                                      queue_ahead=self._queue_ahead(side, px)))
+        return True
 
     def _place_pair(self, side: str, price: float, qty: float, ts: int) -> None:
         """Выставить парную заявку после исполнения: купили на уровне — продаём на
@@ -278,12 +397,12 @@ class PaperEngine:
         q = self.ladder.pair(side, price, qty)
         if q is None or q.price <= 0 or q.size <= 0:
             return
-        if any(not o.manual and o.side == q.side and abs(o.price - q.price) < 1e-9
+        px = self.round_price(q.price, q.side)
+        if any(not o.manual and o.side == q.side and abs(o.price - px) < 1e-9
                for o in self.orders):
             return                                  # на этом уровне заявка уже стоит
-        self.orders.append(_OpenOrder(q.side, q.price, q.size, q.level,
-                                      queue_ahead=self._queue_ahead(q.side, q.price)))
-        self.mm_posted += 1
+        if self._add_grid_order(q.side, q.price, q.size, q.level):
+            self.mm_posted += 1
 
     def _ref_mid(self, fallback: float) -> float:
         """Справедливая середина: mid живой книги (live), иначе fallback (цена тика)."""
@@ -520,8 +639,12 @@ class PaperEngine:
             self._last_price = bar.c
             self.equity_curve.append(self.cash + self.pos.unrealized(bar.c))
             return
-        if not self.active and self.p.mode != "manual":
-            self.active = True                    # бэктест/replay через step = стратегия работает
+        if not self.active and self.p.mode != "manual" \
+                and not self.blocked_reason and not self.liquidated:
+            # бэктест/replay через step = стратегия работает. Но заблокированный
+            # биржевыми ограничениями или ликвидированный инструмент не воскрешаем:
+            # иначе движок будет заново пытаться выставить сетку на каждом баре.
+            self.active = True
         for px in self._bar_ticks(bar):           # тот же путь, что у Live (on_tick)
             self._on_price_event(px, bar.ts)
         self._last_price = bar.c
@@ -830,4 +953,10 @@ class PaperEngine:
             "liquidated": self.liquidated,
             "qty": self.pos.qty,
             "avg_entry": self.pos.avg_entry,
+            # Почему инструмент не торгуется, если не торгуется: биржевые ограничения
+            # (минимальный лот, обеспечение) должны быть видны, а не прятаться в нулях.
+            "blocked": self.blocked_reason,
+            "min_order_usd": round(self.min_qty * self._last_price, 2) if self.min_qty else 0.0,
+            "rejected_min_qty": self.rejected_min_qty,
+            "rejected_margin": self.rejected_margin,
         }

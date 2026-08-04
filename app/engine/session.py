@@ -45,6 +45,10 @@ def _downsample(xs, n=22):
 # кривая эквити/баланса хранится на ВСЮ сессию (старт-депозит закреплён слева);
 # при переполнении прорежаем вдвое, СОХРАНЯЯ индекс 0 (точку старта), а не отрезаем начало.
 _CURVE_CAP = 4000
+# Если по символу дольше этого не было ни одной реальной сделки, считаем поток
+# замолчавшим и возвращаем движок на тиковое исполнение — лучше приблизительно,
+# чем не торговать вовсе.
+_TRADE_STALE_S = 20.0
 
 # сколько последних событий журнала и маркеров филлов слать в кадре (для отображения).
 # ПОЛНАЯ история сессии (без обрезки) доступна через GET /api/live/export.
@@ -73,6 +77,8 @@ class LiveSession:
         self.engines: dict[str, PaperEngine] = {}
         self.hist: dict[str, list[Candle]] = {}
         self.fmap: dict[str, dict] = {}
+        self.specs: dict[str, dict] = {}        # tickSize / qtyStep / minOrderQty по символам
+        self._trade_seen: dict[str, float] = {}  # когда последний раз пришла реальная сделка
         self.state = {"selected": None, "started": False}
         self.ob_state = {"sym": None, "data": None}
         self.ob_feed: OrderBookFeed | None = None   # живой L2-стакан по WS (блок B)
@@ -92,6 +98,7 @@ class LiveSession:
         self.running = True
         await self._build()
         self._tasks = [asyncio.create_task(self._tick_loop()),
+                       asyncio.create_task(self._trades_loop()),
                        asyncio.create_task(self._ob_loop()),
                        asyncio.create_task(self._persist_loop())]
 
@@ -109,9 +116,13 @@ class LiveSession:
         for sym in syms:
             if sym not in self.fmap:
                 self.fmap[sym] = await bybit.fetch_funding(sym)
+        # Шаг цены, шаг лота и минимальный объём — чтобы бумажный счёт не выставлял
+        # заявок, которых биржа бы не приняла.
+        self.specs = await bybit.fetch_many_meta(syms, self.s)
         allocs = risk_parity_alloc(cmap, self.capital)
         for sym in syms:
-            e = PaperEngine(sym, allocs[sym], self.params, self.cost, self.fmap.get(sym))
+            e = PaperEngine(sym, allocs[sym], self.params, self.cost, self.fmap.get(sym),
+                            spec=self.specs.get(sym))
             e.warm(cmap[sym])
             e.last_funding_ts = cmap[sym][-1].ts
             self.engines[sym] = e
@@ -278,12 +289,15 @@ class LiveSession:
     async def _tick_loop(self):
         while self.running:
             try:
-                async for sym, price, tts in bybit.stream_tickers(list(self.engines.keys()), self.s):
+                async for sym, price, mark, tts in bybit.stream_tickers(
+                        list(self.engines.keys()), self.s):
                     if not self.running:
                         break
                     e = self.engines.get(sym)
                     if not e:
                         continue
+                    if mark > 0:
+                        e.mark_price = mark      # ликвидация считается от неё, не от last
                     cs = self.hist.get(sym)
                     if not cs:
                         continue
@@ -344,16 +358,13 @@ class LiveSession:
                             self.ob_state["sym"] = sym
                         except Exception:
                             pass
-                    # блок D: выбранный движок исполняется по РЕАЛЬНЫМ сделкам (trade-through),
-                    # пока книга/поток валидны и стратегия запущена; остальные — по тикеру.
-                    drive = valid and self.state["started"]
-                    for s2, e in self.engines.items():
-                        if s2 == sym and drive:
-                            e.ob_book = self.ob_feed.snapshot(50)   # для оценки очереди
-                            e.trade_driven = True
-                        else:
-                            e.trade_driven = False
-                            e.ob_book = None
+                    # Исполнение по реальным сделкам ведёт _trades_loop — по ВСЕЙ корзине.
+                    # Здесь только оценка позиции в очереди для выбранного символа:
+                    # она требует L2-книги, а держать десять книг сразу слишком дорого.
+                    self._refresh_trade_driven()
+                    se = self.engines.get(sym)
+                    if se is not None:
+                        se.ob_book = self.ob_feed.snapshot(50) if valid else None
                 await asyncio.sleep(0.5)
         finally:
             self.ob_feed.stop()
@@ -378,6 +389,62 @@ class LiveSession:
             e.process_trade(tr.price, tr.size, tr.side, tr.ts)
         except Exception:
             pass
+
+    async def _trades_loop(self):
+        """Лента РЕАЛЬНЫХ сделок по ВСЕЙ корзине (publicTrade.<sym>).
+
+        Зачем. Раньше честный trade-through был только у ВЫБРАННОГО инструмента, а
+        остальные девять исполнялись по тикеру: цена прошла уровень — значит филл,
+        без учёта реально прошедшего объёма. Это ровно тот оптимизм, из-за которого
+        бумажный счёт расходится с биржей. Теперь по всей корзине заявка исполняется
+        только на объём фактических сделок; оценка позиции в очереди (L2-книга) —
+        по-прежнему у выбранного символа, она слишком тяжёлая для десяти сразу.
+
+        Если поток по символу замолчал дольше _TRADE_STALE_S, движок возвращается на
+        тиковое исполнение: лучше приблизительно, чем не торговать вовсе."""
+        import json as _json
+        syms = list(self.engines.keys())
+        topics = [f"publicTrade.{s}" for s in syms]
+        while self.running:
+            try:
+                async for msg in bybit.stream_public_ws(topics, self.s):
+                    if not self.running:
+                        break
+                    if not str(msg.get("topic", "")).startswith("publicTrade."):
+                        continue
+                    for row in (msg.get("data") or []):
+                        sym = row.get("s")
+                        e = self.engines.get(sym)
+                        if not e:
+                            continue
+                        try:
+                            price = float(row["p"])
+                            size = float(row["v"])
+                            side = row.get("S") or "Buy"
+                            ts = int(row.get("T") or bybit.now_ms())
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        self._trade_seen[sym] = time.monotonic()
+                        if e.liquidated or not self.state["started"]:
+                            continue
+                        try:
+                            e.process_trade(price, size, side, ts)
+                        except Exception:
+                            pass
+            except Exception:
+                await asyncio.sleep(2)          # реконнект к Bybit ws
+
+    def _refresh_trade_driven(self):
+        """Кто исполняется по реальным сделкам, а кто откатился на тики."""
+        now = time.monotonic()
+        sel = self.state["selected"]
+        for sym, e in self.engines.items():
+            fresh = (now - self._trade_seen.get(sym, 0.0)) <= _TRADE_STALE_S
+            e.trade_driven = bool(fresh and self.state["started"])
+            # L2-книга (позиция в очереди) — только у выбранного: держать десять
+            # книг одновременно дорого, а без книги очередь просто не оценивается.
+            if sym != sel:
+                e.ob_book = None
 
     async def _persist_loop(self):
         while self.running:

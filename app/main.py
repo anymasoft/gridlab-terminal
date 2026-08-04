@@ -157,7 +157,11 @@ async def _load_candles(symbols: list[str], interval: str) -> dict:
     fmap = {}
     for sym in cmap:
         fmap[sym] = await bybit.fetch_funding(sym)
-    return {"candles": cmap, "funding": fmap}
+    # Спецификации инструментов нужны и бэктесту: если прогон выставляет заявки не
+    # по шагу тика и не по шагу лота, он считает не то, что происходило бы на бирже,
+    # и расходится с живой торговлей.
+    specs = await bybit.fetch_many_meta(list(cmap.keys()), s)
+    return {"candles": cmap, "funding": fmap, "specs": specs}
 
 
 def _build_charts(candles_map: dict, result: dict, n: int = 150) -> dict:
@@ -195,7 +199,7 @@ async def api_backtest(req: RunRequest) -> JSONResponse:
         return JSONResponse({"error": "Не удалось загрузить свечи Bybit"}, status_code=502)
 
     result = manager.run_portfolio(cmap, s, base, req.per_symbol,
-                                   loaded["funding"], interval)
+                                   loaded["funding"], interval, loaded.get("specs"))
     result["charts"] = _build_charts(cmap, result)
     result["params"] = base.model_dump()
     result["venue"] = s.resolve_venue()

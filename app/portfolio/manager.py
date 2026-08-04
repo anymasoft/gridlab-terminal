@@ -69,16 +69,19 @@ def _fmt_price(v: float) -> str:
 def run_portfolio(candles_map: dict[str, list[Candle]], settings: Settings,
                   base: GridParams, per_symbol: dict[str, GridParams] | None = None,
                   funding_map: dict[str, dict[int, float]] | None = None,
-                  interval: str = "15") -> dict:
+                  interval: str = "15",
+                  specs: dict[str, dict] | None = None) -> dict:
     per_symbol = per_symbol or {}
     funding_map = funding_map or {}
+    specs = specs or {}
     cost = CostModel.from_settings(settings)
     allocs = risk_parity_alloc(candles_map, settings.start_capital)
 
     engines: dict[str, PaperEngine] = {}
     for sym, candles in candles_map.items():
         p = per_symbol.get(sym, base)
-        eng = PaperEngine(sym, allocs[sym], p, cost, funding_map.get(sym))
+        eng = PaperEngine(sym, allocs[sym], p, cost, funding_map.get(sym),
+                          spec=specs.get(sym))
         eng.run(candles)
         engines[sym] = eng
 
@@ -109,7 +112,10 @@ def run_portfolio(candles_map: dict[str, list[Candle]], settings: Settings,
             "pnl": s["pnl"],
             "pnl_pct": s["pnl_pct"],
             "orders": s["orders_open"],
-            "status": "stop" if s["liquidated"] else "active",
+            "status": ("stop" if s["liquidated"]
+                       else "blocked" if s.get("blocked") else "active"),
+            "blocked": s.get("blocked", ""),
+            "min_order_usd": s.get("min_order_usd", 0.0),
             "trades": s["trades"],
             "spark": _downsample(e.equity_curve),
             "fills": [{"ts": f.ts, "side": f.side, "price": f.price}

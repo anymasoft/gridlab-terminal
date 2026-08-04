@@ -20,8 +20,12 @@ class Settings(BaseSettings):
     bybit_testnet_api_key: str = ""
     bybit_testnet_api_secret: str = ""
 
-    maker_fee_bps: float = 1.0     # Bybit деривативы maker 0.01%
-    taker_fee_bps: float = 6.0     # Bybit деривативы taker 0.06%
+    # Стандартный тариф Bybit для USDT-перпетуалов без VIP: maker 0.02%, taker 0.055%.
+    # Раньше здесь стояли 0.01% / 0.06% — комиссия мейкера была занижена вдвое, а для
+    # сеточной стратегии, которая торгует почти только мейкером, это вдвое заниженные
+    # издержки. ПОДСТАВЬТЕ ФАКТИЧЕСКИЙ ТАРИФ СВОЕГО АККАУНТА: при VIP-уровне он ниже.
+    maker_fee_bps: float = 2.0     # Bybit деривативы maker 0.02%
+    taker_fee_bps: float = 5.5     # Bybit деривативы taker 0.055%
     slippage_bps: float = 1.0
     latency_ms: int = 250
     leverage: float = 3.0

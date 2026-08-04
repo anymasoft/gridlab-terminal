@@ -199,12 +199,14 @@ async def run_live(ws, settings: Settings, params: GridParams,
 
     try:
         await ws.send_json(build_frame())
-        async for sym, price, tts in bybit.stream_tickers(syms, s):
+        async for sym, price, mark, tts in bybit.stream_tickers(syms, s):
             if state["stop"]:
                 break
             e = engines.get(sym)
             if not e:
                 continue
+            if mark > 0:
+                e.mark_price = mark      # ликвидация считается от mark, не от last
             cs = hist[sym]
             cur = cs[-1]
             # роллбар: новая свеча по интервалу

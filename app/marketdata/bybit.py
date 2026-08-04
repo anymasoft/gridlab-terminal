@@ -96,6 +96,18 @@ async def fetch_instrument_meta(symbol: str,
         return {"tick_size": 0.0, "qty_step": 0.0, "min_qty": 0.0}
 
 
+async def fetch_many_meta(symbols: list[str],
+                          settings: Settings | None = None) -> dict[str, dict]:
+    """Спецификации инструментов корзины: tickSize, qtyStep, minOrderQty.
+
+    Без них бумажный счёт выставляет заявки, которых биржа бы не приняла: цена не
+    по шагу тика, объём не по шагу лота, объём ниже минимального."""
+    async def one(sym: str) -> tuple[str, dict]:
+        return sym, await fetch_instrument_meta(sym, settings)
+    pairs = await asyncio.gather(*(one(s) for s in symbols))
+    return {sym: meta for sym, meta in pairs}
+
+
 async def fetch_orderbook(symbol: str, depth: int = 16,
                           settings: Settings | None = None) -> dict:
     """Стакан Bybit: {'a': [[price,size]...] аски ↑, 'b': [[price,size]...] биды ↓}."""
@@ -131,8 +143,13 @@ _WS_TESTNET = "wss://stream-testnet.bybit.com/v5/public/linear"
 
 
 async def stream_tickers(symbols: list[str], settings: Settings | None = None):
-    """Async-генератор реальных тиков Bybit: yield (symbol, last_price, ts_ms).
-    Одно подключение на всю корзину (topics tickers.<symbol>). Сабсредства — keyless."""
+    """Async-генератор реальных тиков Bybit: yield (symbol, last_price, mark_price, ts_ms).
+
+    mark_price отдаётся отдельно от last: Bybit считает ликвидацию по mark (сглаженной
+    по индексу), а не по цене последней сделки. Если биржа mark не прислала — 0.0,
+    и вызывающий использует last.
+
+    Одно подключение на всю корзину (topics tickers.<symbol>). Keyless."""
     import json
     import websockets  # из uvicorn[standard]
 
@@ -152,10 +169,12 @@ async def stream_tickers(symbols: list[str], settings: Settings | None = None):
                 continue
             data = d.get("data") or {}
             lp = data.get("lastPrice") or data.get("markPrice")
+            mp = data.get("markPrice")
             sym = data.get("symbol") or topic.split(".", 1)[-1]
             if lp:
                 try:
-                    yield sym, float(lp), int(d.get("ts", 0)) or now_ms()
+                    mark = float(mp) if mp else 0.0
+                    yield sym, float(lp), mark, int(d.get("ts", 0)) or now_ms()
                 except (TypeError, ValueError):
                     continue
 

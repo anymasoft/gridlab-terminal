@@ -266,6 +266,132 @@ def test_pair_recovers_when_ladder_state_missing():
     assert sells, f"парный TP на 101.0 не выставлен; ордеров было {before}, стало {len(fresh.orders)}"
 
 
+# ─────────────── биржевые ограничения инструмента ───────────────
+def _spec_engine(alloc=1000.0, spec=None, **kw):
+    p = GridParams(mode="grid", grid_side=kw.pop("grid_side", "long"), **kw)
+    e = PaperEngine("BTCUSDT", alloc, p, CostModel.from_settings(Settings()),
+                    funding={}, spec=spec)
+    base, cs = 100.0, []
+    for i in range(40):
+        o = base + (i % 5) * 0.1
+        c = o + (0.2 if i % 2 else -0.2)
+        cs.append(Candle(ts=1_700_000_000_000 + i * 60_000,
+                         o=o, h=o + 0.5, l=o - 0.5, c=c, v=10.0))
+    e.warm(cs)
+    return e
+
+
+def test_price_rounds_to_tick_conservatively():
+    """Цена заявки обязана лечь на шаг тика. Округляем консервативно: buy вниз,
+    sell вверх — иначе заявка окажется БЛИЖЕ к рынку, чем задумано, и бумажный счёт
+    получит исполнение по цене, до которой рынок в реальности не дошёл."""
+    e = _spec_engine(spec={"tick_size": 0.5, "qty_step": 0.0, "min_qty": 0.0})
+    assert e.round_price(100.37, "buy") == 100.0
+    assert e.round_price(100.37, "sell") == 100.5
+    assert e.round_price(100.5, "buy") == 100.5      # уже на тике — не двигаем
+    assert e.round_price(100.5, "sell") == 100.5
+
+
+def test_qty_rounds_down_to_lot_step():
+    e = _spec_engine(spec={"tick_size": 0.0, "qty_step": 0.01, "min_qty": 0.0})
+    assert abs(e.round_qty(1.2345) - 1.23) < 1e-12
+    assert abs(e.round_qty(0.999) - 0.99) < 1e-12
+
+
+def test_order_below_min_qty_is_not_placed():
+    """Заявка меньше минимального объёма биржей отклоняется — значит и у нас
+    её быть не должно, иначе бумажный счёт торгует то, чего не смог бы."""
+    e = _spec_engine(spec={"tick_size": 0.0, "qty_step": 0.0, "min_qty": 5.0})
+    assert e.round_qty(1.0) == 0.0
+    e.active = True
+    assert e._add_grid_order("buy", 99.0, 1.0, 1) is False
+    assert e.rejected_min_qty == 1
+    assert not e.orders
+
+
+def test_ladder_respects_instrument_spec():
+    """Сквозная проверка: все уровни реальной лестницы лежат на шаге тика."""
+    e = _spec_engine(spec={"tick_size": 0.5, "qty_step": 0.001, "min_qty": 0.0},
+                     grid_side="neutral", grid_step_mode="pct", grid_step_pct=1.0)
+    e.start_strategy(100.0)
+    assert e.orders
+    for o in e.orders:
+        k = o.price / 0.5
+        assert abs(k - round(k)) < 1e-6, f"цена {o.price} не лежит на шаге тика 0.5"
+
+
+# ─────────────── маржа под выставленные заявки ───────────────
+def test_open_orders_consume_margin():
+    """Заявка, способная нарастить позицию, занимает обеспечение — как на бирже."""
+    e = _spec_engine(alloc=100.0)
+    e._last_price = 100.0
+    e.active = True
+    assert e._margin_used(100.0) == 0.0
+    e._add_grid_order("buy", 99.0, 1.0, 1)          # нотионал ~100 при плече 3 → маржа ~33
+    used = e._margin_used(100.0)
+    assert 32.0 < used < 34.0, f"ожидалась маржа ~33, получено {used}"
+
+
+def test_netting_reserves_by_larger_side_not_sum():
+    """Неттинг: встречные заявки не могут нарастить позицию одновременно, поэтому
+    обеспечение считается по БОЛЬШЕЙ стороне. Сетка на $100 выставляет $100 покупок
+    и $100 продаж — суммарно $200 нотионала, но реальный риск $100."""
+    s = Settings()
+    p = GridParams(mode="grid", grid_side="neutral", grid_levels=10,
+                   grid_notional_mult=1.0, grid_step_mode="pct", grid_step_pct=1.0)
+    cost = CostModel.from_settings(s)
+    cost.leverage = 1.0                              # без плеча: маржа = нотионал
+    e = PaperEngine("BTCUSDT", 100.0, p, cost, funding={})
+    cs = [Candle(ts=1_700_000_000_000 + i * 60_000, o=100.0, h=100.5, l=99.5,
+                 c=100.0 + (0.2 if i % 2 else -0.2), v=10.0) for i in range(40)]
+    e.warm(cs)
+    e.start_strategy(100.0)
+    buys = sum(o.size * o.price for o in e.orders if o.side == "buy" and not o.manual)
+    sells = sum(o.size * o.price for o in e.orders if o.side == "sell" and not o.manual)
+    assert buys > 0 and sells > 0, "должны стоять обе стороны"
+    assert max(buys, sells) <= 100.0 + 1e-6, \
+        f"худшая сторона ${max(buys, sells):.2f} превысила капитал $100"
+    assert e._margin_used(100.0) <= 100.0 + 1e-6
+
+
+def test_margin_rejects_orders_beyond_capital():
+    """Запрос нотионала выше доступного обеспечения: часть уровней не выставится —
+    ровно как отклонила бы биржа."""
+    s = Settings()
+    p = GridParams(mode="grid", grid_side="long", grid_levels=10,
+                   grid_notional_mult=4.0,           # заведомо больше, чем позволит плечо 1
+                   grid_step_mode="pct", grid_step_pct=1.0)
+    cost = CostModel.from_settings(s)
+    cost.leverage = 1.0
+    e = PaperEngine("BTCUSDT", 100.0, p, cost, funding={})
+    cs = [Candle(ts=1_700_000_000_000 + i * 60_000, o=100.0, h=100.5, l=99.5,
+                 c=100.0 + (0.2 if i % 2 else -0.2), v=10.0) for i in range(40)]
+    e.warm(cs)
+    e.start_strategy(100.0)
+    buys = sum(o.size * o.price for o in e.orders if o.side == "buy")
+    assert buys <= 100.0 + 1e-6, f"нотионал покупок ${buys:.2f} превысил капитал $100"
+    assert e.rejected_margin > 0, "часть заявок должна быть отклонена по марже"
+
+
+# ─────────────── ликвидация по mark price ───────────────
+def test_liquidation_uses_mark_price_not_last():
+    """Bybit ликвидирует по mark price. Если last дёрнулся вниз на тонком стакане,
+    а mark остался на месте, позицию трогать нельзя."""
+    def run(mark):
+        e = _spec_engine(alloc=1000.0)
+        e.active = True
+        px = 100.0
+        e.pos.qty = (1000.0 / px) * 30.0             # заведомо большое плечо
+        e.pos.avg_entry = px
+        e.mark_price = mark
+        e._check_liquidation(ts=1, mark=50.0)        # last провалился вдвое
+        return e.liquidated
+
+    assert run(0.0) is True, "без mark price ликвидация считается по last — контроль"
+    assert run(100.0) is False, "при неизменной mark price ликвидации быть не должно"
+    assert run(50.0) is True, "если mark тоже упала — ликвидация обязана сработать"
+
+
 # ─────────────────────────── сайзинг и плечо ───────────────────────────
 def test_order_size_scales_with_allocation():
     """Размер ордера обязан зависеть от аллокации инструмента. Раньше стояла
