@@ -723,6 +723,10 @@ class LiveSession:
                      "roi": round(roi, 2), "drawdown": round(dd * 100, 2),
                      "realized": round(total_real, 2), "unrealized": round(total_unreal, 2),
                      "open_orders": open_ord, "fees": round(total_fees, 2),
+                     # Число ИСПОЛНЕННЫХ сделок. Счётчика лимиток недостаточно:
+                     # он почти всегда стоит на месте (исполнилась заявка — сразу
+                     # выставилась парная), и по нему не видно, торгует ли сетка.
+                     "trades": sum(e.trades for e in engines.values()),
                      "funding": round(total_fund, 2)},
             "instruments": instruments,
             "candles": [[c.o, c.h, c.l, c.c, c.v] for c in tail],

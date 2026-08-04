@@ -161,10 +161,10 @@ function dash(){
   if(S.streamMode==='live' && S.live) return S.live.dash;
   if(S.tradingStarted && S.result){
     const r=S.result;
-    return {balance:r.balance,equity:r.equity,roi:r.roi,drawdown:r.drawdown,realized:r.realized,unrealized:r.unrealized,open_orders:r.open_orders,fees:r.fees,funding:r.funding};
+    return {balance:r.balance,equity:r.equity,roi:r.roi,drawdown:r.drawdown,realized:r.realized,unrealized:r.unrealized,open_orders:r.open_orders,trades:r.trades,fees:r.fees,funding:r.funding};
   }
   const cap=S.cfg?S.cfg.start_capital:1000;
-  return {balance:cap,equity:cap,roi:0,drawdown:0,realized:0,unrealized:0,open_orders:0,fees:0,funding:0};
+  return {balance:cap,equity:cap,roi:0,drawdown:0,realized:0,unrealized:0,open_orders:0,trades:0,fees:0,funding:0};
 }
 function logRows(){
   if(S.streamMode==='live' && S.live) return S.live.recent||[];
@@ -340,8 +340,8 @@ function instRowsHTML(){
   }).join('') || '<div style="padding:20px 13px;color:#939a93;font-size:12px;">Загрузка…</div>';
 }
 
-function card(label,val,color){
-  return `<div style="display:flex;flex-direction:column;padding:6px 10px;border:1px solid #e3e6e0;border-radius:8px;min-width:84px;">
+function card(label,val,color,tip){
+  return `<div ${tip?`data-tip="${tip}"`:''} style="display:flex;flex-direction:column;padding:6px 10px;border:1px solid #e3e6e0;border-radius:8px;min-width:84px;">
     <span style="font-size:9px;letter-spacing:.06em;color:#939a93;font-weight:600;">${label}</span>
     <span class="mono" style="font-size:13.5px;font-weight:600;margin-top:2px;${color?'color:'+color+';':''}">${val}</span></div>`;
 }
@@ -356,17 +356,31 @@ function cardsHTML(){
     card('DRAWDOWN','-'+d.drawdown+'%',C.red),
     card('REALIZED',fmt(d.realized),d.realized>=0?C.green:C.red),
     card('UNREAL.',fmt(d.unrealized),d.unrealized>=0?C.green:C.red),
-    card('OPEN ORD',String(d.open_orders)),
+    card('ЛИМИТОК',String(d.open_orders),null,
+      'Сколько заявок СТОИТ в стакане и ждёт цену — как «Активные ордера» на бирже. Это не исполненные сделки. У сетки из 10 уровней их всегда около 20 (10 покупок + 10 продаж): как только заявка исполняется, сетка тут же ставит парную на уровень выше или ниже, и счётчик возвращается к прежнему. Исполнения смотрите в «СДЕЛОК» и во вкладке «Сделки».'),
+    card('СДЕЛОК',String(d.trades!=null?d.trades:0),null,
+      'Сколько заявок РЕАЛЬНО исполнилось с начала счёта. Именно этот счётчик растёт при каждом касании ценой уровня сетки.'),
     card('FEES',fmt(-d.fees),C.red),
     card('FUNDING',fmt(-d.funding),d.funding>=0?C.red:C.green),
   ].join('');
+}
+
+function chartHintHTML(){
+  // Подпись обязана ПЕРЕСЧИТЫВАТЬСЯ: раньше она рисовалась один раз при сборке
+  // панели и потом врала — сетка работала, а под графиком висело «не запущена».
+  const mode = S.params.mode==='grid'?'классический грид'
+             : S.params.mode==='avellaneda'?'Avellaneda-Stoikov':'эвристика';
+  const hint = stratOn()
+    ? ' · сетка работает: сплошные — стоящие лимитки, пунктир — следующие уровни'
+    : ' · сетка не запущена — нажми «Старт · '+S.selInst+'»';
+  return 'Grid · '+mode+hint;
 }
 
 function centerPanel(){
   const cards = cardsHTML();
   const eqc=eqCurve();
   const eqLast = eqc? '$'+eqc[eqc.length-1].toFixed(2) : '$'+ (S.cfg?S.cfg.start_capital.toFixed(2):'1000');
-  const dragHint = stratOn()? ' · стратегия запущена: сплошные — активные лимитки, пунктир — превью следующих уровней' : ' · сетка не запущена — нажми «Старт · '+S.selInst+'»';
+
   // Заблокированный инструмент обязан объясняться НА ГРАФИКЕ. Раньше причина
   // жила только в панели портфеля, а она сворачивается — и человек видел пустой
   // график без сетки без единого намёка почему.
@@ -382,8 +396,8 @@ function centerPanel(){
       <div style="position:absolute;top:8px;left:12px;z-index:2;pointer-events:none;display:flex;align-items:center;gap:8px;">
         <span class="mono" style="font-size:12px;font-weight:600;">${S.selInst}</span>
         <span class="mono" style="font-size:10px;color:#939a93;background:#eef0ec;border-radius:4px;padding:2px 6px;">${tfLabel(S.tf)}</span>
-        <span style="font-size:10px;color:#3B82CE;font-weight:500;">Grid · ${S.params.mode==='grid'?'классический грид':S.params.mode==='avellaneda'?'Avellaneda-Stoikov':'эвристика'}${dragHint}</span>
-        ${blockedNote}
+        <span id="chartHint" style="font-size:10px;color:#3B82CE;font-weight:500;">${chartHintHTML()}</span>
+        <span id="blockedNote">${blockedNote}</span>
       </div>
       <div id="lwchart" style="position:absolute;inset:0;"></div>
     </div>
@@ -1257,6 +1271,7 @@ function liveApply(){
   }
   // если фокус на input параметра — не трогаем правую панель (её и не обновляем)
   const cr=$('cardsRow'); if(cr) cr.innerHTML=cardsHTML();
+  const ch=$('chartHint'); if(ch) ch.textContent=chartHintHTML();
   const il=$('instList'); if(il) il.innerHTML=instRowsHTML();
   const lh=$('leftHead'); if(lh) lh.innerHTML=leftHeadHTML();
   // журнал перестраиваем ТОЛЬКО при изменении (новое событие/смена вкладки/старт-стоп) —
