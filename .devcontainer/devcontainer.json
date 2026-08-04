@@ -2,14 +2,20 @@
   "name": "GRIDLAB",
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
 
-  // Зависимости ставятся один раз при создании контейнера.
+  // Зависимости ставятся один раз при создании контейнера — это работает
+  // надёжно и без участия редактора.
   "postCreateCommand": "pip install --no-cache-dir -r requirements.txt",
 
-  // Старт при каждом запуске контейнера. Именно postStartCommand, а не
-  // postAttachCommand: его выполняет агент Codespaces, независимо от того,
-  // подключился ли редактор и доверяет ли он папке.
-  // nohup + фон, чтобы команда не блокировала запуск контейнера.
-  "postStartCommand": "nohup python run.py > /tmp/gridlab.log 2>&1 &",
+  // Автозапуск приложения здесь сознательно не делается.
+  // postStartCommand с фоновым процессом не выживает: контейнерный shell
+  // завершается и убивает его. postAttachCommand выполняет редактор, а он
+  // на первом открытии стартует в ограниченном режиме и команду блокирует.
+  // Надёжнее одна явная команда в терминале — см. README.
+  //
+  //   python run.py
+  //
+  // Порт ниже проброшен заранее, поэтому превью откроется само,
+  // как только приложение начнёт слушать.
 
   "forwardPorts": [8100],
   "portsAttributes": {
@@ -21,11 +27,7 @@
 
   "customizations": {
     "vscode": {
-      "extensions": ["ms-python.python"],
-      "settings": {
-        // Без этого редактор стартует в ограниченном режиме и блокирует автозапуск.
-        "security.workspace.trust.enabled": false
-      }
+      "extensions": ["ms-python.python"]
     }
   }
 }
