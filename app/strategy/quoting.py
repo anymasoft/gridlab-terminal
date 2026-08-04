@@ -49,6 +49,8 @@ def desired_quotes(price: float, ind: Indicators, pos: Position,
                    p: GridParams, alloc: float) -> list[QuoteLevel]:
     if price <= 0 or ind.atr <= 0:
         return []
+    if p.mode == "grid":
+        return []          # классический грид котирует GridLadder, не Quoter (см. ladder.py)
     if p.mode == "avellaneda":
         return _avellaneda_canonical(price, ind, pos, p, alloc)
     if p.mode == "avellaneda_legacy":

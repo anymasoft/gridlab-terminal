@@ -2,7 +2,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const S = { tab:'single', source:'local', tf:'15m', bars:4000, capital:1000,
-  base:{ mode:'avellaneda', grid_spacing:1.8, levels:2, max_orders:2, tp:1.5, sl:4, ema:21,
+  base:{ mode:'grid', grid_spacing:1.5, levels:2, max_orders:2, tp:1.5, sl:4, ema:21,
          expansion:'geometric', as_gamma:0.3, as_kappa:1.5 },
   weights:{ w_dd:0.5, w_fees:0.2 },
   last:{} };
@@ -41,6 +41,7 @@ function renderSide(){
     <div class="h">База стратегии</div>
     <label>Режим</label>
     <select id="mode">
+      <option value="grid" ${b.mode==='grid'?'selected':''}>Классический грид</option>
       <option value="avellaneda" ${b.mode==='avellaneda'?'selected':''}>Avellaneda-Stoikov</option>
       <option value="heuristic" ${b.mode==='heuristic'?'selected':''}>Эвристика</option>
     </select>

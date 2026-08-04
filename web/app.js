@@ -29,7 +29,7 @@ S.book = { asks:new Map(), bids:new Map(), my:{aheadDisp:0}, imbDisp:0.5,
 
 // подсказки к параметрам (shadcn-like тултипы)
 const TIPS = {
-  mode:'Механизм адаптации сетки. Эвристика: «чем больше инвентарь — тем шире шаг и осторожнее». Avellaneda-Stoikov: центр сетки математически смещается против позиции (inventory-skew).',
+  mode:'Грид (по умолчанию): уровни стоят НЕПОДВИЖНО, купленный на уровне лот продаётся лимиткой на уровень выше — прибыль снимается с колебания цены. Эвристика и Avellaneda-Stoikov — маркет-мейкинг: котировки перецентрируются на текущую цену после каждого исполнения, что в тренде превращается в погоню за ценой.',
   grid_spacing:'Шаг сетки в единицах ATR. Безразмерный (k×ATR), а не в %/$ — чтобы параметр был сравним между инструментами. Больше k = реже ордера, меньше комиссий.',
   levels:'Сколько ордеров с каждой стороны. 2 = по одному (1 buy + 1 sell) — основной режим. Больше = лесенка дальше от цены (ловит только быстрые прострелы за один тик). На скорость набора и риск влияет «Max ордеров» (потолок инвентаря), а на то, как шаг расширяется при наборе позиции — γ (риск-аверсия) в режиме A-S.',
   order_usd:'Размер одного ордера в долларах (нотионал). Количество в монете считается как $ / цена. Например $80 при BTC≈66800 ≈ 0.0012 BTC.',
@@ -363,7 +363,7 @@ function centerPanel(){
       <div style="position:absolute;top:8px;left:12px;z-index:2;pointer-events:none;display:flex;align-items:center;gap:8px;">
         <span class="mono" style="font-size:12px;font-weight:600;">${S.selInst}</span>
         <span class="mono" style="font-size:10px;color:#939a93;background:#eef0ec;border-radius:4px;padding:2px 6px;">${tfLabel(S.tf)}</span>
-        <span style="font-size:10px;color:#3B82CE;font-weight:500;">Grid · ${S.params.mode==='avellaneda'?'Avellaneda-Stoikov':'эвристика'}${dragHint}</span>
+        <span style="font-size:10px;color:#3B82CE;font-weight:500;">Grid · ${S.params.mode==='grid'?'классический грид':S.params.mode==='avellaneda'?'Avellaneda-Stoikov':'эвристика'}${dragHint}</span>
       </div>
       <div id="lwchart" style="position:absolute;inset:0;"></div>
     </div>
@@ -445,9 +445,12 @@ function paramsDrawer(){
 // где член потока ≈ 2/κ доминирует (grid_spacing там НЕ участвует). Значит МЕНЬШЕ κ =
 // ШИРЕ спред. Поэтому «Широкий» имеет НИЗКИЙ κ, «Узкий» — высокий (иначе ширина инвертируется).
 const PARAM_PRESETS = {
-  A: {mode:'avellaneda', grid_spacing:1.8, order_usd:80,  as_gamma:0.3, as_kappa:500,  as_horizon:200, max_orders:10, sl:0, max_drawdown_pct:0},  // Широкий: низкий κ → шире
-  B: {mode:'avellaneda', grid_spacing:0.8, order_usd:200, as_gamma:0.1, as_kappa:1000, as_horizon:120, max_orders:10, sl:0, max_drawdown_pct:0},  // Узкий: высокий κ → уже
-  C: {mode:'avellaneda', grid_spacing:1.2, order_usd:100, as_gamma:0.5, as_kappa:300,  as_horizon:150, max_orders:10, sl:0, max_drawdown_pct:0},  // Альткоин: самый низкий κ → самый широкий
+  // A и B — классический грид: широкий шаг = редкие сделки и больше прибыли на сделку,
+  // узкий = чаще оборот. Комиссия фиксирована, поэтому слишком узкий шаг съедает эдж.
+  A: {mode:'grid', grid_spacing:2.0, grid_levels:10, grid_notional_mult:1.0, grid_reanchor:0, sl:0, max_drawdown_pct:0},
+  B: {mode:'grid', grid_spacing:0.8, grid_levels:16, grid_notional_mult:1.0, grid_reanchor:0, sl:0, max_drawdown_pct:0},
+  // C — маркет-мейкинг для сравнения: та же корзина, но с перецентровкой котировок.
+  C: {mode:'avellaneda', grid_spacing:1.8, order_usd:80, as_gamma:0.3, as_kappa:500, as_horizon:200, max_orders:10, sl:0, max_drawdown_pct:0},
 };
 function presetStyle(name){
   const on = S._activePreset===name;
@@ -492,25 +495,30 @@ function rightPanel(){
     <div style="padding:0 14px 0;">
       <div style="font-size:10px;letter-spacing:.08em;color:#aab0a9;font-weight:600;margin-bottom:6px;">ПРЕСЕТ</div>
       <div style="display:flex;gap:6px;">
-        <button data-preset="A" class="hov" data-tip="Широкий (Conservative): широкий спред, редкие сделки, минимум adverse selection. Длинные прогоны 24ч+. В A-S ширину даёт НИЗКИЙ κ." style="${presetStyle('A')}">A · Широкий</button>
-        <button data-preset="B" class="hov" data-tip="Узкий (Active): узкий спред, частые сделки, больше оборот. Быстрый набор статистики 2–6ч. В A-S узость даёт ВЫСОКИЙ κ." style="${presetStyle('B')}">B · Узкий</button>
-        <button data-preset="C" class="hov" data-tip="Альткоин: для менее ликвидных пар с широким рыночным спредом (ETHBTC, 1000PEPEUSDT и т.п.). Самый широкий A-S-спред." style="${presetStyle('C')}">C · Альткоин</button>
+        <button data-preset="A" class="hov" data-tip="Грид, широкий шаг (2 ATR): редкие сделки, больше прибыли на round-trip, комиссия почти незаметна. Спокойный режим для длинных прогонов." style="${presetStyle('A')}">A · Широкий</button>
+        <button data-preset="B" class="hov" data-tip="Грид, узкий шаг (0.8 ATR) и 16 уровней: частые сделки, быстрый набор статистики. Прибыль на сделку меньше — доля комиссии выше." style="${presetStyle('B')}">B · Узкий</button>
+        <button data-preset="C" class="hov" data-tip="Маркет-мейкинг Avellaneda-Stoikov для СРАВНЕНИЯ: котировки перецентрируются после каждого исполнения. На исторических прогонах уступает гриду — режим оставлен как база сравнения." style="${presetStyle('C')}">C · Маркет-мейк</button>
       </div>
       <div style="height:1px;background:#e3e6e0;margin:11px 0 0;"></div>
     </div>
     <div style="padding:10px 14px 10px;">
       <div style="font-size:10px;letter-spacing:.08em;color:#aab0a9;font-weight:600;margin-bottom:6px;display:flex;align-items:center;">РЕЖИМ АДАПТАЦИИ${qq('mode')}</div>
       <div style="display:flex;gap:2px;background:#eef0ec;border:1px solid #e3e6e0;border-radius:8px;padding:2px;">
+        <button data-mode="grid" style="${seg(p.mode==='grid')}">Грид</button>
         <button data-mode="heuristic" style="${seg(p.mode==='heuristic')}">Эвристика</button>
         <button data-mode="avellaneda" style="${seg(p.mode==='avellaneda')}">Avellaneda-S.</button>
       </div>
     </div>
     <div style="padding:0 14px;display:flex;flex-direction:column;">
       ${paramRow('Grid Spacing (ATR ×)','grid_spacing',0.1,0.1,10)}
-      ${paramRow('Кол-во уровней','levels',1,2,30)}
-      ${paramRow('Размер ордера ($)','order_usd',10,1,100000)}
+      ${p.mode==='grid'
+        ? paramRow('Уровней лестницы','grid_levels',1,2,50)
+          + paramRow('Нотионал (× капитала)','grid_notional_mult',0.1,0.1,10)
+          + paramRow('Ре-анкор (0 = выкл)','grid_reanchor',0.25,0,5)
+        : paramRow('Кол-во уровней','levels',1,2,30)
+          + paramRow('Размер ордера ($)','order_usd',10,1,100000)
+          + paramRow('Max ордеров','max_orders',1,2,50)}
       ${paramRow('EMA-фильтр','ema',1,5,200)}
-      ${paramRow('Max ордеров','max_orders',1,2,50)}
       ${paramRow('Kill-switch просадка %','max_drawdown_pct',0.5,0,90)}
       ${p.mode==='avellaneda'?paramRow('γ (риск-аверсия)','as_gamma',0.05,0.05,3)+paramRow('κ (поток)','as_kappa',0.1,0.1,10):''}
       <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid #eef0ec;">

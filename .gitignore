@@ -22,6 +22,10 @@ data/
 *.db-shm
 *.db-wal
 
+# Node — нужен только для скрипта скриншотов (scripts/screenshots.mjs)
+node_modules/
+package-lock.json
+
 # Логи
 *.log
 

@@ -37,9 +37,16 @@ def _grid(e):
     return buys, sells
 
 
-def test_default_mode_is_avellaneda():
-    """Правка 2: дефолтный режим GridParams — канонический A-S."""
-    assert GridParams().mode == "avellaneda"
+def test_default_mode_is_classic_grid():
+    """Дефолтный режим — классический грид (неподвижная лестница + парный take-profit).
+
+    Раньше дефолтом был канонический A-S. Он корректен как маркет-мейкинг, но
+    перецентрирует котировки после каждого исполнения — в тренде это гонка за ценой
+    без парной продажи. На корзине из 10 перпов такой дефолт давал 8 939 сделок
+    за 1000 баров и −78% по счёту. A-S остаётся доступен явным mode='avellaneda'
+    и покрыт тестами ниже — сменился дефолт, а не набор режимов."""
+    assert GridParams().mode == "grid"
+    assert GridParams(mode="avellaneda").mode == "avellaneda"
 
 
 def test_no_recenter_without_fill():

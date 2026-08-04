@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from ..models import Candle, Fill, GridParams, Position
 from ..strategy.indicators import Indicators
+from ..strategy.ladder import GridLadder
 from ..strategy.quoter import Quoter
 from .costmodel import CostModel
 
@@ -58,6 +59,9 @@ class PaperEngine:
         self.mult = mult
         self.ind = Indicators(atr_window=params.atr_window, ema_window=params.ema)
         self.quoter = Quoter()    # единая политика котирования (Live == бэктест)
+        # Классический грид: неподвижная лестница уровней с парным take-profit.
+        # Используется только в режиме 'grid'; в MM-режимах котирует Quoter.
+        self.ladder = GridLadder(params.grid_levels, params.grid_side)
         self.pos = Position()
         self.cash = alloc
         self.orders: list[_OpenOrder] = []
@@ -171,6 +175,15 @@ class PaperEngine:
 
     # ───────── маржа / ликвидация ─────────
     def _check_liquidation(self, ts: int, mark: float) -> bool:
+        """Маржинальная ликвидация — событие ОДНОРАЗОВОЕ и терминальное.
+
+        До правки флаг `liquidated` ставился, но торговля продолжалась: `_on_price_event`
+        переустанавливал сетку, не сверяясь с флагом, счёт ликвидировался снова и снова
+        (на AVAXUSDT — 410 раз за 1000 баров) и уходил в минус на 2.4 своей аллокации.
+        При изолированной марже такого не бывает: потеря ограничена внесённым обеспечением,
+        остаток забирает страховой фонд биржи."""
+        if self.liquidated:
+            return True                                       # счёт уничтожен — торговли больше нет
         if self.pos.qty == 0:
             return False
         notional = abs(self.pos.qty) * mark * self.mult       # деньги (₽ для фьючерса)
@@ -181,8 +194,12 @@ class PaperEngine:
             fp = self.cost.fill_price(mark, side, is_maker=False)
             r = self._apply_fill(side, qty, fp, is_maker=False, ts=ts, note="liquidation")
             self.liquidated = True
+            self.active = False                               # ← котирование прекращается навсегда
+            if self.cash < 0.0:
+                self.cash = 0.0                               # изолированная маржа: минус не переносится
             self.events.append(StepEvent(ts, "Ликвидация ⚠", fp, qty,
-                                         self.fills[-1].fee, r, "маржа исчерпана, позиция закрыта"))
+                                         self.fills[-1].fee, r,
+                                         "маржа исчерпана, позиция закрыта, счёт остановлен"))
             self.orders.clear()
             return True
         return False
@@ -206,12 +223,56 @@ class PaperEngine:
             self.orders = manual
             self._set_anchor(center)
             return
+        if self.p.mode == "grid":
+            self._install_ladder(center, manual, ts)
+            return
         quotes = self.quoter.build(center, self.ind, self.pos, self.p, self.alloc)
         grid = [_OpenOrder(q.side, q.price, q.size, q.level,
                            queue_ahead=self._queue_ahead(q.side, q.price)) for q in quotes]
         self.orders = manual + grid
         self.mm_posted += len(grid)              # для fill-rate (блок F)
         self._set_anchor(center)
+
+    # ───────── классический грид: лестница и парные заявки ─────────
+    def _grid_size_of(self, price: float) -> float:
+        """Размер одного ордера лестницы. Привязан к АЛЛОКАЦИИ инструмента:
+        предельный нотионал alloc × grid_notional_mult, нарезанный на grid_levels.
+        Абсолютная константа order_usd здесь не используется намеренно — именно она
+        при корзине из 10 инструментов (alloc ≈ $100, order_usd = $80) давала потолок
+        позиции в 8× капитала при заявленном в конфиге плече 3×."""
+        if self.p.contract_qty > 0:
+            return self.p.contract_qty          # фьючерс: размер в контрактах
+        n = max(1, self.p.grid_levels)
+        usd = self.alloc * self.p.grid_notional_mult / n
+        return usd / price if price > 0 else 0.0
+
+    def _install_ladder(self, center: float, manual: list[_OpenOrder], ts: int) -> None:
+        """Поставить неподвижную лестницу. Вызывается ОДИН раз при запуске (и при
+        ре-анкоре после пробоя) — а не после каждого исполнения, как перецентровка
+        в MM-режимах."""
+        step = self.quoter.step_size(center, self.ind, self.p)
+        quotes = self.ladder.install(center, step, self._grid_size_of)
+        if not quotes:
+            return
+        self.orders = manual + [
+            _OpenOrder(q.side, q.price, q.size, q.level,
+                       queue_ahead=self._queue_ahead(q.side, q.price))
+            for q in quotes]
+        self.mm_posted += len(quotes)
+        self._set_anchor(center)
+
+    def _place_pair(self, side: str, price: float, qty: float, ts: int) -> None:
+        """Выставить парную заявку после исполнения: купили на уровне — продаём на
+        уровень выше, и наоборот. Это и есть съём прибыли в гриде; перецентровки нет."""
+        q = self.ladder.pair(side, price, qty)
+        if q is None or q.price <= 0 or q.size <= 0:
+            return
+        if any(not o.manual and o.side == q.side and abs(o.price - q.price) < 1e-9
+               for o in self.orders):
+            return                                  # на этом уровне заявка уже стоит
+        self.orders.append(_OpenOrder(q.side, q.price, q.size, q.level,
+                                      queue_ahead=self._queue_ahead(q.side, q.price)))
+        self.mm_posted += 1
 
     def _ref_mid(self, fallback: float) -> float:
         """Справедливая середина: mid живой книги (live), иначе fallback (цена тика)."""
@@ -271,6 +332,11 @@ class PaperEngine:
     def grid_info(self) -> dict:
         """Реальные шаг/диапазон сетки движка — для панели «ТЕКУЩАЯ СЕТКА»."""
         prices = [o.price for o in self.orders if not o.manual]
+        if self.p.mode == "grid" and self.ladder.installed:
+            return {"step": round(self.ladder.step, 4), "center": round(self.ladder.center, 4),
+                    "low": round(min(prices), 4) if prices else None,
+                    "high": round(max(prices), 4) if prices else None,
+                    "count": len(prices)}
         return {"step": round(self.quoter.last_step, 4) if self.quoter.last_step else None,
                 "low": round(min(prices), 4) if prices else None,
                 "high": round(max(prices), 4) if prices else None,
@@ -337,7 +403,8 @@ class PaperEngine:
         if self._handle_pause(ts, price):
             self._last_price = price
             return
-        if self.active and not any(not o.manual for o in self.orders):
+        if self.active and not self.liquidated and not self.halted \
+                and not any(not o.manual for o in self.orders):
             self._install_grid(price, ts)
         grid_filled = self._match_tick(price, ts)
         self._requote_and_risk(price, ts, grid_filled)
@@ -394,6 +461,8 @@ class PaperEngine:
         if not manual:
             self.mm_filled += 1                                 # fill-rate
             self._mk_pending.append((ts, fill_price, o.side))   # markout (adverse selection)
+            if self.p.mode == "grid":
+                self._place_pair(o.side, fill_price, qty, ts)   # парный take-profit
         o.size -= qty
         partial = o.size > 1e-12
         if not partial:
@@ -417,8 +486,15 @@ class PaperEngine:
         """После исполнения или существенного сдвига — переставить сетку по A-S; затем риск."""
         if self._check_killswitch(ts, price):            # kill-switch по просадке (блок G)
             return
-        if self.active and not self._in_session_pause(ts) and grid_filled:
-            self._install_grid(price, ts)   # перецентровка ТОЛЬКО после исполнения (не по _state_shifted)
+        if self.active and not self._in_session_pause(ts):
+            if self.p.mode == "grid":
+                # Классический грид НЕ перецентруется: уровни неподвижны, прибыль снимают
+                # парные заявки из _place_pair. Переустановка — только при явном пробое
+                # диапазона лестницы (grid_reanchor > 0), по умолчанию никогда.
+                if self.ladder.out_of_range(price, self.p.grid_reanchor):
+                    self._install_grid(price, ts)
+            elif grid_filled:
+                self._install_grid(price, ts)   # перецентровка ТОЛЬКО после исполнения (не по _state_shifted)
         # стоп-лосса НЕТ: выход из позиции — встречной лимиткой (sell сверху), а не тейкером по рынку.
         # buy снизу + sell сверху сами балансируют позицию. _check_stop_tick намеренно не вызывается.
         self._check_liquidation(ts, price)   # только маржинальная ликвидация (биржевая, не стоп стратегии)
@@ -502,7 +578,8 @@ class PaperEngine:
         if self._handle_pause(ts, price):
             self._last_price = price
             return
-        if self.active and not any(not o.manual for o in self.orders):
+        if self.active and not self.liquidated and not self.halted \
+                and not any(not o.manual for o in self.orders):
             self._install_grid(price, ts)
         self._requote_and_risk(price, ts, False)
         self._last_price = price
@@ -520,7 +597,8 @@ class PaperEngine:
         if self._handle_pause(ts, price):
             self._last_price = price
             return
-        if self.active and not any(not o.manual for o in self.orders):
+        if self.active and not self.liquidated and not self.halted \
+                and not any(not o.manual for o in self.orders):
             self._install_grid(price, ts)
         mid = self._ref_mid(price)                 # справедливая середина книги для разложения PnL
         grid_filled = False
@@ -552,13 +630,28 @@ class PaperEngine:
 
     # ───────── риск-контроль (блок G) ─────────
     def _max_contracts(self, price: float) -> float:
-        """ЖЁСТКИЙ потолок позиции в контрактах = max_orders единиц инвентаря.
-        Фьючерс: max_orders × contract_qty; крипто: max_orders × (order_usd/price)."""
-        if self.p.max_orders <= 0:
+        """ЖЁСТКИЙ потолок позиции в контрактах. Два независимых ограничения, берётся
+        строгое из них:
+
+        1) число единиц инвентаря — grid_levels в режиме 'grid', иначе max_orders;
+        2) ПЛЕЧО: нотионал не выше alloc × leverage — то, что заявлено в .env.
+
+        До правки действовало только (1), и плечо из конфига не проверялось нигде.
+        На корзине из 10 инструментов (alloc ≈ $100, order_usd = $80, max_orders = 10)
+        потолок позиции выходил $800 — восьмикратное плечо при LEVERAGE=3.0."""
+        if price <= 0:
             return 0.0
-        if self.p.contract_qty > 0:
-            return self.p.max_orders * self.p.contract_qty
-        return self.p.max_orders * (self.p.order_usd / price) if price > 0 else 0.0
+        caps: list[float] = []
+        if self.p.mode == "grid":
+            n = max(1, self.p.grid_levels)
+            caps.append(n * self.p.contract_qty if self.p.contract_qty > 0
+                        else self.alloc * self.p.grid_notional_mult / price)
+        elif self.p.max_orders > 0:
+            caps.append(self.p.max_orders * self.p.contract_qty if self.p.contract_qty > 0
+                        else self.p.max_orders * (self.p.order_usd / price))
+        if self.cost.leverage > 0 and self.alloc > 0:
+            caps.append(self.alloc * self.cost.leverage / price)
+        return min(caps) if caps else 0.0
 
     def _allowed_qty(self, side: str, qty: float, price: float) -> float:
         """Урезать объём филла так, чтобы НЕ превысить жёсткий лимит позиции на стороне
